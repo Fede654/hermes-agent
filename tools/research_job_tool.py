@@ -1,8 +1,7 @@
-"""research_job — long-running research job orchestration tool.
+"""research_job_tool — orchestrate long-running research jobs as detached OS processes.
 
-Provides start/status/resume for research loops that run as detached OS
-processes, avoiding iteration-budget and timeout problems of the spawning
-agent.
+Provides start, status, collect, and resume operations for research loops
+that outlive a single agent turn.
 """
 
 from __future__ import annotations
@@ -11,56 +10,123 @@ import json
 import logging
 import os
 import secrets
-import subprocess
-import sys
-import time
+import shlex
 from pathlib import Path
 from typing import Any, Optional
 
-from hermes_constants import get_hermes_home
+from tools.registry import registry, tool_error
 
 logger = logging.getLogger(__name__)
+
+
+def _job_dir(job_id: str) -> Path:
+    from hermes_constants import get_hermes_home
+    return get_hermes_home() / "research-jobs" / job_id
+
+
+def _write_job_spec(job_id: str, spec: dict[str, Any]) -> Path:
+    jd = _job_dir(job_id)
+    jd.mkdir(parents=True, exist_ok=True)
+    spec_path = jd / "job.json"
+    spec_path.write_text(json.dumps(spec, indent=2))
+    return spec_path
+
+
+def _load_config_for_job() -> dict[str, Any]:
+    """Read Hermes config to extract model/provider/base_url for the runner."""
+    import yaml
+    config_path = Path.home() / ".hermes" / "config.yaml"
+    if not config_path.exists():
+        return {}
+    cfg = yaml.safe_load(config_path.read_text())
+    model_cfg = cfg.get("model", {})
+    delegation_cfg = cfg.get("delegation", {})
+    return {
+        "model": delegation_cfg.get("model") or model_cfg.get("default", "kimi-for-coding"),
+        "provider": delegation_cfg.get("provider") or model_cfg.get("provider", "kimi-coding"),
+        "base_url": delegation_cfg.get("base_url") or model_cfg.get("base_url", "https://api.kimi.com/coding/v1"),
+        "api_key": os.getenv("KIMI_API_KEY", ""),
+    }
+
 
 # ---------------------------------------------------------------------------
 # Tool schema
 # ---------------------------------------------------------------------------
 
-RESEARCH_JOB_TOOL_SCHEMA = {
+RESEARCH_JOB_SCHEMA = {
     "name": "research_job",
     "description": (
-        "Start, monitor, or resume a long-running research job that runs as a detached "
-        "OS process.  Use this when a research task needs multiple iterations and may take "
-        "10+ minutes, to avoid burning the spawning agent's iteration budget or hitting "
-        "foreground timeouts.\n\n"
+        "Start, monitor, or resume a long-running research job as a detached OS process. "
+        "Use this instead of run_research when the loop may take longer than a single "
+        "agent turn (e.g. >5 minutes). Jobs are durable: state is checkpointed to disk "
+        "after every round, and can be resumed if the process crashes.\n\n"
         "USE WHEN:\n"
-        "- A research loop needs >3 iterations or >5 minutes total\n"
-        "- You want the loop to survive even if the spawning agent restarts\n"
-        "- You need checkpoint/resume for reliability\n\n"
+        "- A research task needs multiple iterations and may take 10+ minutes\n"
+        "- You cannot afford to keep a foreground agent alive as a watcher\n\n"
         "NOT FOR:\n"
-        "- One-shot tasks (use run_research directly)\n"
-        "- Tasks that finish in <60 seconds (use delegate_task)\n\n"
-        "IMPORTANT: Jobs run in the background.  You must poll or wait for completion."
+        "- One-shot tasks (use delegate_task directly)\n"
+        "- Tasks that fit in a single agent turn (use run_research)\n\n"
+        "IMPORTANT: This tool spawns a background process. Poll status with "
+        "`research_job_status` or wait for the process completion notification."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["start", "status", "resume", "list"],
-                "description": "Action to perform: start a new job, check status, resume a paused job, or list active jobs.",
-            },
-            "spec": {
-                "type": "object",
-                "description": (
-                    "For action='start': the research spec.  Must contain at least "
-                    "topic, deliverable, metric_key.  Optional: metric_direction, "
-                    "task_type, evaluation_mode, evaluation_prompt, max_iterations, "
-                    "time_budget_sec, lattice_task_id, toolsets."
-                ),
+                "enum": ["start", "status", "collect", "resume"],
+                "description": "Operation to perform on the research job.",
             },
             "job_id": {
                 "type": "string",
-                "description": "For action='status' or 'resume': the job ID returned by start.",
+                "description": "Job identifier. Required for status, collect, resume. Generated on start if omitted.",
+            },
+            "topic": {
+                "type": "string",
+                "description": "What to research. Required for start.",
+            },
+            "deliverable": {
+                "type": "string",
+                "description": "Concrete output the worker must produce. Required for start.",
+            },
+            "metric_key": {
+                "type": "string",
+                "description": "Name of the metric to optimize. Required for start.",
+            },
+            "metric_direction": {
+                "type": "string",
+                "enum": ["maximize", "minimize"],
+                "description": "Whether higher or lower metric values are better. Default: maximize.",
+            },
+            "task_type": {
+                "type": "string",
+                "enum": ["code", "search", "research", "generic"],
+                "description": "Task domain. Default: generic.",
+            },
+            "evaluation_mode": {
+                "type": "string",
+                "enum": ["self_report", "llm_judge"],
+                "description": "How to score worker output. Default: self_report.",
+            },
+            "evaluation_prompt": {
+                "type": "string",
+                "description": "For llm_judge mode: scoring rubric.",
+            },
+            "max_iterations": {
+                "type": "integer",
+                "description": "Max improvement iterations after baseline. Default: 3.",
+            },
+            "time_budget_sec": {
+                "type": "integer",
+                "description": "Time budget per worker invocation in seconds. Default: 0 (unlimited).",
+            },
+            "lattice_task_id": {
+                "type": "string",
+                "description": "Optional Lattice task ID for round-by-round progress comments.",
+            },
+            "initial_attempt": {
+                "type": "string",
+                "description": "Optional starting scaffold for the worker.",
             },
         },
         "required": ["action"],
@@ -69,243 +135,232 @@ RESEARCH_JOB_TOOL_SCHEMA = {
 
 
 # ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _job_dir(job_id: str) -> Path:
-    return get_hermes_home() / "research-jobs" / job_id
-
-
-def _venv_python() -> str:
-    hermes_root = Path(__file__).resolve().parent.parent
-    venv_python = hermes_root / "venv" / "bin" / "python"
-    if venv_python.exists():
-        return str(venv_python)
-    return sys.executable
-
-
-def _write_job_spec(job_dir: Path, spec: dict[str, Any]) -> None:
-    job_dir.mkdir(parents=True, exist_ok=True)
-    spec_path = job_dir / "job.json"
-    spec_path.write_text(json.dumps(spec, indent=2))
-
-
-def _write_state(job_dir: Path, state: dict[str, Any]) -> None:
-    state_path = job_dir / "state.json"
-    state["updated_at"] = time.time()
-    state_path.write_text(json.dumps(state, indent=2))
-
-
-def _read_state(job_dir: Path) -> dict[str, Any]:
-    state_path = job_dir / "state.json"
-    if not state_path.exists():
-        return {}
-    try:
-        return json.loads(state_path.read_text())
-    except json.JSONDecodeError:
-        return {}
-
-
-def _spawn_runner(job_dir: Path, spec: dict[str, Any]) -> subprocess.Popen:
-    """Launch the detached runner process."""
-    python = _venv_python()
-    runner_module = "agent.research_job_runner"
-    env = {**os.environ, "HERMES_YOLO_MODE": "1"}
-
-    stdout_log = job_dir / "runner.stdout.log"
-    stderr_log = job_dir / "runner.stderr.log"
-    stdout_f = stdout_log.open("a")
-    stderr_f = stderr_log.open("a")
-
-    proc = subprocess.Popen(
-        [python, "-m", runner_module, str(job_dir)],
-        stdout=stdout_f,
-        stderr=stderr_f,
-        env=env,
-        start_new_session=True,  # detach from parent terminal
-    )
-    return proc
-
-
-# ---------------------------------------------------------------------------
 # Actions
 # ---------------------------------------------------------------------------
 
-def _action_start(spec: dict[str, Any]) -> dict[str, Any]:
-    job_id = spec.get("job_id") or secrets.token_hex(8)
+def _action_start(args: dict[str, Any]) -> str:
+    job_id = args.get("job_id") or secrets.token_hex(8)
+    cfg = _load_config_for_job()
+
+    spec = {
+        "job_id": job_id,
+        "topic": args.get("topic", ""),
+        "deliverable": args.get("deliverable", ""),
+        "metric_key": args.get("metric_key", ""),
+        "metric_direction": args.get("metric_direction", "maximize"),
+        "task_type": args.get("task_type", "generic"),
+        "evaluation_mode": args.get("evaluation_mode", "self_report"),
+        "evaluation_prompt": args.get("evaluation_prompt", ""),
+        "max_iterations": args.get("max_iterations", 3),
+        "time_budget_sec": args.get("time_budget_sec", 0),
+        "lattice_task_id": args.get("lattice_task_id"),
+        "initial_attempt": args.get("initial_attempt", ""),
+        "model": cfg.get("model"),
+        "provider": cfg.get("provider"),
+        "base_url": cfg.get("base_url"),
+        "api_key": cfg.get("api_key"),
+        "toolsets": ["research", "terminal", "file", "web"],
+    }
+
+    spec_path = _write_job_spec(job_id, spec)
     job_dir = _job_dir(job_id)
 
-    full_spec = {
-        **spec,
-        "job_id": job_id,
-        "job_dir": str(job_dir),
-    }
-    _write_job_spec(job_dir, full_spec)
+    hermes_root = Path("/home/fede/.hermes/hermes-agent")
+    cmd = (
+        f"cd {shlex.quote(str(hermes_root))} && "
+        f"source venv/bin/activate && "
+        f"HERMES_YOLO_MODE=1 python -m agent.research_job_runner {shlex.quote(str(spec_path))}"
+    )
+
+    # Spawn via terminal_tool in background
+    from tools.terminal_tool import terminal
+    raw = terminal(
+        command=cmd,
+        background=True,
+        notify_on_complete=True,
+        workdir=str(hermes_root),
+    )
+    proc = json.loads(raw) if isinstance(raw, str) else raw
 
     state = {
         "job_id": job_id,
         "status": "queued",
-        "action": "start",
-    }
-    _write_state(job_dir, state)
-
-    proc = _spawn_runner(job_dir, full_spec)
-
-    state["status"] = "running"
-    state["pid"] = proc.pid
-    _write_state(job_dir, state)
-
-    logger.info("Research job started: %s (pid=%d)", job_id, proc.pid)
-    return {
-        "job_id": job_id,
-        "status": "running",
-        "pid": proc.pid,
+        "process_session_id": proc.get("session_id"),
+        "pid": proc.get("pid"),
         "job_dir": str(job_dir),
-        "workspace": str(get_hermes_home() / "research-workspace"),
+        "spec_path": str(spec_path),
     }
+    (job_dir / "state.json").write_text(json.dumps(state, indent=2))
+
+    return json.dumps({
+        "ok": True,
+        "job_id": job_id,
+        "status": "queued",
+        "message": f"Research job {job_id} queued. Poll with research_job_status or wait for completion notification.",
+        "job_dir": str(job_dir),
+        "process_session_id": proc.get("session_id"),
+    }, indent=2)
 
 
-def _action_status(job_id: str) -> dict[str, Any]:
+def _action_status(args: dict[str, Any]) -> str:
+    job_id = args.get("job_id", "")
+    if not job_id:
+        return tool_error("job_id is required for status")
+
     job_dir = _job_dir(job_id)
-    if not job_dir.exists():
-        return {"error": f"Job {job_id} not found"}
+    state_path = job_dir / "state.json"
+    if not state_path.exists():
+        return json.dumps({"ok": False, "error": f"Job {job_id} not found"}, indent=2)
 
-    state = _read_state(job_dir)
-    spec_path = job_dir / "job.json"
-    result_path = job_dir / "result.json"
-    report_path = job_dir / "report.md"
+    state = json.loads(state_path.read_text())
 
-    # If state says running, verify the process is still alive
-    if state.get("status") == "running":
-        pid = state.get("pid")
-        if pid and isinstance(pid, int):
+    # If still running, also poll the background process
+    if state.get("status") in ("queued", "running"):
+        session_id = state.get("process_session_id")
+        if session_id:
             try:
-                os.kill(pid, 0)
-            except OSError:
-                state["status"] = "interrupted"
-                _write_state(job_dir, state)
+                from tools.process_registry import process
+                proc_info = process(action="poll", session_id=session_id)
+                state["process_alive"] = proc_info.get("status") == "running"
+                state["process_uptime_seconds"] = proc_info.get("uptime_seconds")
+            except Exception:
+                state["process_alive"] = False
 
-    out: dict[str, Any] = {
-        "job_id": job_id,
-        "status": state.get("status", "unknown"),
-        "state": state,
-    }
-
-    if result_path.exists():
+    # Include latest metric if available
+    history_path = job_dir / "history.json"
+    if history_path.exists():
         try:
-            out["result"] = json.loads(result_path.read_text())
-        except json.JSONDecodeError:
+            history = json.loads(history_path.read_text())
+            best = history.get("best")
+            if best:
+                state["best_metric"] = best.get("primary_metric")
+                state["best_iteration"] = best.get("iteration")
+        except Exception:
             pass
 
-    if report_path.exists():
-        out["report_path"] = str(report_path)
-
-    if spec_path.exists():
-        try:
-            out["spec"] = json.loads(spec_path.read_text())
-        except json.JSONDecodeError:
-            pass
-
-    return out
+    return json.dumps({"ok": True, **state}, indent=2)
 
 
-def _action_resume(job_id: str) -> dict[str, Any]:
+def _action_collect(args: dict[str, Any]) -> str:
+    job_id = args.get("job_id", "")
+    if not job_id:
+        return tool_error("job_id is required for collect")
+
     job_dir = _job_dir(job_id)
-    if not job_dir.exists():
-        return {"error": f"Job {job_id} not found"}
+    result_path = job_dir / "result.json"
+    state_path = job_dir / "state.json"
 
-    state = _read_state(job_dir)
-    if state.get("status") not in ("interrupted", "failed"):
-        return {"error": f"Job {job_id} cannot be resumed from status '{state.get('status')}'"}
+    if not result_path.exists():
+        status = "unknown"
+        if state_path.exists():
+            status = json.loads(state_path.read_text()).get("status", "unknown")
+        return json.dumps({
+            "ok": False,
+            "error": f"Result not ready. Job status: {status}",
+            "job_id": job_id,
+        }, indent=2)
 
+    result = json.loads(result_path.read_text())
+    return json.dumps({"ok": True, "job_id": job_id, **result}, indent=2)
+
+
+def _action_resume(args: dict[str, Any]) -> str:
+    job_id = args.get("job_id", "")
+    if not job_id:
+        return tool_error("job_id is required for resume")
+
+    job_dir = _job_dir(job_id)
+    state_path = job_dir / "state.json"
     spec_path = job_dir / "job.json"
-    if not spec_path.exists():
-        return {"error": f"Job spec missing for {job_id}"}
+    history_path = job_dir / "history.json"
 
-    spec = json.loads(spec_path.read_text())
+    if not state_path.exists() or not spec_path.exists():
+        return json.dumps({"ok": False, "error": f"Job {job_id} not found"}, indent=2)
 
-    # Mark resume attempt
+    state = json.loads(state_path.read_text())
+    if state.get("status") not in ("interrupted", "failed"):
+        return json.dumps({
+            "ok": False,
+            "error": f"Cannot resume job in status '{state.get('status')}'. Only interrupted or failed jobs can be resumed."
+        }, indent=2)
+
+    # Mark as resuming and re-launch
     state["status"] = "resuming"
+    state_path.write_text(json.dumps(state, indent=2))
+
+    hermes_root = Path("/home/fede/.hermes/hermes-agent")
+    cmd = (
+        f"cd {shlex.quote(str(hermes_root))} && "
+        f"source venv/bin/activate && "
+        f"HERMES_YOLO_MODE=1 python -m agent.research_job_runner {shlex.quote(str(spec_path))}"
+    )
+
+    from tools.terminal_tool import terminal
+    raw = terminal(
+        command=cmd,
+        background=True,
+        notify_on_complete=True,
+        workdir=str(hermes_root),
+    )
+    proc = json.loads(raw) if isinstance(raw, str) else raw
+
+    state["status"] = "queued"
+    state["process_session_id"] = proc.get("session_id")
+    state["pid"] = proc.get("pid")
     state["resumed_at"] = time.time()
-    _write_state(job_dir, state)
+    state_path.write_text(json.dumps(state, indent=2))
 
-    proc = _spawn_runner(job_dir, spec)
-
-    state["status"] = "running"
-    state["pid"] = proc.pid
-    _write_state(job_dir, state)
-
-    logger.info("Research job resumed: %s (pid=%d)", job_id, proc.pid)
-    return {
+    return json.dumps({
+        "ok": True,
         "job_id": job_id,
-        "status": "running",
-        "pid": proc.pid,
-        "job_dir": str(job_dir),
-    }
-
-
-def _action_list() -> dict[str, Any]:
-    jobs_dir = get_hermes_home() / "research-jobs"
-    if not jobs_dir.exists():
-        return {"jobs": []}
-
-    jobs: list[dict[str, Any]] = []
-    for entry in sorted(jobs_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
-        if not entry.is_dir():
-            continue
-        state = _read_state(entry)
-        jobs.append({
-            "job_id": entry.name,
-            "status": state.get("status", "unknown"),
-            "updated_at": state.get("updated_at"),
-        })
-    return {"jobs": jobs[:20]}
+        "status": "queued",
+        "message": f"Research job {job_id} resumed.",
+        "process_session_id": proc.get("session_id"),
+    }, indent=2)
 
 
 # ---------------------------------------------------------------------------
 # Tool handler
 # ---------------------------------------------------------------------------
 
-def handle_research_job(args: dict[str, Any]) -> str:
-    action = args.get("action", "")
-    try:
-        if action == "start":
-            result = _action_start(args.get("spec", {}))
-        elif action == "status":
-            result = _action_status(args.get("job_id", ""))
-        elif action == "resume":
-            result = _action_resume(args.get("job_id", ""))
-        elif action == "list":
-            result = _action_list()
-        else:
-            result = {"error": f"Unknown action: {action}"}
-    except Exception as exc:
-        logger.exception("research_job action=%s failed", action)
-        result = {"error": str(exc)}
-
-    return json.dumps(result, indent=2)
+def research_job(
+    action: str,
+    job_id: str = "",
+    topic: str = "",
+    deliverable: str = "",
+    metric_key: str = "",
+    metric_direction: str = "maximize",
+    task_type: str = "generic",
+    evaluation_mode: str = "self_report",
+    evaluation_prompt: str = "",
+    max_iterations: int = 3,
+    time_budget_sec: int = 0,
+    lattice_task_id: str = "",
+    initial_attempt: str = "",
+    **_: Any,
+) -> str:
+    if action == "start":
+        if not topic or not deliverable or not metric_key:
+            return tool_error("topic, deliverable, and metric_key are required for start")
+        return _action_start(locals())
+    elif action == "status":
+        return _action_status(locals())
+    elif action == "collect":
+        return _action_collect(locals())
+    elif action == "resume":
+        return _action_resume(locals())
+    else:
+        return tool_error(f"Unknown action: {action}")
 
 
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
-from tools.registry import registry
-
-
-def _check_research_job_requirements() -> bool:
-    try:
-        from tools.research_tool import run_research  # noqa: F401
-        return True
-    except ImportError:
-        return False
-
-
 registry.register(
     name="research_job",
     toolset="research",
-    schema=RESEARCH_JOB_TOOL_SCHEMA,
-    handler=lambda args, **kw: handle_research_job(args),
-    check_fn=_check_research_job_requirements,
-    emoji="📚",
+    schema=RESEARCH_JOB_SCHEMA,
+    handler=lambda args, **kw: research_job(**args),
+    emoji="📋",
 )

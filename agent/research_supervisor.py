@@ -418,6 +418,7 @@ class ResearchSupervisor:
         keep_threshold: float = 0.0,
         llm: Any = None,
         worker_toolsets: list[str] | None = None,
+        checkpoint_dir: Path | None = None,
     ) -> ExperimentHistory:
         """Run the Karpathy loop for any TaskSpec.
 
@@ -483,6 +484,7 @@ class ResearchSupervisor:
         best_artifact_holder: list[str] = [baseline_artifact]
         # --- OBSERVE ---
         self._observe(baseline, spec, run_dir)
+        self._checkpoint(runner.history, checkpoint_dir, round=0)
 
         if llm is None:
             lattice_comment_fn(f"Baseline only. best={runner.history.baseline_metric}")
@@ -504,6 +506,7 @@ class ResearchSupervisor:
 
             # OBSERVE + REMEMBER — extract and persist structured learning
             self._observe(result, spec, run_dir)
+            self._checkpoint(runner.history, checkpoint_dir, round=iteration)
 
             # SEPL: evaluate → keep/discard (handled by ExperimentRunner)
             # SEPL: rollback — restore best on-disk artifact, not the seed string
@@ -728,6 +731,63 @@ class ResearchSupervisor:
             result.iteration, entry_type, spec.metric_key,
             entry["confidence"], insight_text[:80],
         )
+
+    def _checkpoint(
+        self,
+        history: ExperimentHistory,
+        checkpoint_dir: Path | None,
+        round: int,
+    ) -> None:
+        """Serialize experiment history to a durable checkpoint directory.
+
+        Called after baseline and every completed iteration so that external
+        monitors (e.g. research_job_tool) can read progress without polling
+        the running process.
+        """
+        if checkpoint_dir is None:
+            return
+
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+        # Serialize results
+        results = []
+        for r in history.results:
+            results.append({
+                "run_id": r.run_id,
+                "iteration": r.iteration,
+                "metrics": r.metrics,
+                "primary_metric": r.primary_metric,
+                "improved": r.improved,
+                "kept": r.kept,
+                "elapsed_sec": r.elapsed_sec,
+                "error": r.error,
+            })
+
+        best = None
+        if history.best_result:
+            br = history.best_result
+            best = {
+                "run_id": br.run_id,
+                "iteration": br.iteration,
+                "primary_metric": br.primary_metric,
+                "metrics": br.metrics,
+            }
+
+        checkpoint_dir.joinpath("history.json").write_text(
+            json.dumps({"results": results, "best": best}, indent=2)
+        )
+
+        # Lightweight status file for quick polling
+        checkpoint_dir.joinpath("checkpoint.json").write_text(
+            json.dumps({
+                "round": round,
+                "total_rounds": len(history.results),
+                "best_metric": history.best_result.primary_metric if history.best_result else None,
+                "updated_at": _time.time(),
+            }, indent=2)
+        )
+
+        logger.debug("[checkpoint] round=%d dir=%s", round, checkpoint_dir)
 
     # ------------------------------------------------------------------
     # Autogenesis: Reflect (SEPL reflection optimizer on early stop)

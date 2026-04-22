@@ -166,6 +166,7 @@ def run_research(
     time_budget_sec: int = 0,
     lattice_task_id: Optional[str] = None,
     parent_agent: Any = None,
+    checkpoint_dir: Optional[str] = None,
 ) -> str:
     if parent_agent is None:
         return json.dumps({"error": "run_research requires a parent_agent context."})
@@ -201,6 +202,7 @@ def run_research(
             max_iterations=max_iterations,
             time_budget_sec=time_budget_sec,
             llm=_LLMBridge(),
+            checkpoint_dir=Path(checkpoint_dir) if checkpoint_dir else None,
         )
     except Exception as exc:
         logger.exception("run_research failed for run_id=%s: %s", run_id, exc)
@@ -258,6 +260,7 @@ registry.register(
         time_budget_sec=args.get("time_budget_sec", 0),
         lattice_task_id=args.get("lattice_task_id"),
         parent_agent=kw.get("parent_agent"),
+        checkpoint_dir=args.get("checkpoint_dir"),
     ),
     check_fn=_check_research_requirements,
     emoji="🔬",
