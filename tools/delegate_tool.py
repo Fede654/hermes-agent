@@ -1013,9 +1013,9 @@ def _build_child_agent(
         child_thinking_cb = _child_thinking
 
     # Resolve effective credentials: config override > parent inherit
-    effective_model = model or parent_agent.model
+    effective_model = model or getattr(parent_agent, "model", None)
     effective_provider = override_provider or getattr(parent_agent, "provider", None)
-    effective_base_url = override_base_url or parent_agent.base_url
+    effective_base_url = override_base_url or getattr(parent_agent, "base_url", None)
     effective_api_key = override_api_key or parent_api_key
     effective_api_mode = override_api_mode or getattr(parent_agent, "api_mode", None)
     effective_acp_command = override_acp_command or getattr(

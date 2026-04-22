@@ -935,7 +935,12 @@ class ResearchSupervisor:
                 [{"role": "user", "content": prompt}],
                 system="You are an objective evaluator. Return only a decimal number between 0.0 and 1.0.",
             )
-            raw = getattr(response, "content", "").strip().split()[0].rstrip(".,")
+            content = (getattr(response, "content", "") or "").strip()
+            tokens = content.split()
+            if not tokens:
+                logger.warning("LLM judge returned empty response")
+                return None
+            raw = tokens[0].rstrip(".,")
             return max(0.0, min(1.0, float(raw)))
         except Exception as exc:
             logger.warning("LLM judge scoring failed: %s", exc)
