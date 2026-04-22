@@ -1,0 +1,117 @@
+# =============================================================================
+# Hermes AutoResearch — Prompt Templates
+# =============================================================================
+#
+# Extracted from AutoResearchClaw prompts.default.yaml (MIT).
+# Only the blocks needed by the Karpathy inner loop are kept:
+#   - blocks.compute_budget       — time-guard logic for workers
+#   - blocks.topic_constraint     — hard topic constraint for code generation
+#   - blocks.lattice_metric_reporting — Hermes-specific metric output format
+#   - stages.code_generation      — experiment code generation prompts
+#
+# Template variables use {var_name} syntax.
+# =============================================================================
+
+blocks:
+  compute_budget: |
+    ## Compute Budget Constraint
+    - Total execution time limit: {time_budget_sec} seconds
+    - You MUST design experiments that complete within this budget
+    - Estimate: a simple numpy loop runs ~10M iterations/sec; a nested loop over
+      conditions runs proportionally slower
+    - SCALING RULES (mandatory):
+      - If total conditions > 100: reduce seeds to 3-5 (not 20)
+      - If total conditions > 500: reduce to 2-3 representative conditions per factor
+      - If time_budget < 300s: limit total optimization steps to ≤5,000 per run
+      - If time_budget < 120s: limit total optimization steps to ≤1,000 per run
+      - Always print intermediate results so partial data is captured on timeout
+    - MANDATORY: print a "TIME_ESTIMATE: Xs" line before the main loop,
+      estimating total runtime based on a small pilot (run 1 condition, extrapolate)
+    - MANDATORY: implement a time guard — check elapsed time periodically and
+      stop gracefully if approaching 80% of budget, saving all results collected so far
+
+  topic_constraint: '
+
+
+    === HARD TOPIC CONSTRAINT ===
+
+    The paper MUST be about: {topic}
+
+    PROHIBITED content (unless user explicitly specifies case-study mode):
+
+    - Do NOT treat environment setup, dependency installation, or infrastructure failures as a research contribution.
+
+    - Do NOT present debugging logs, system errors, or configuration issues as experimental findings.
+
+    - Do NOT drift to tangential topics not directly related to the stated topic.
+
+    - Every section MUST connect back to the core research question.
+
+    - The Abstract and Introduction MUST clearly state the research problem derived from: {topic}
+
+    - The Method section MUST describe a technical approach, not a workflow.
+
+    - The Results section MUST report quantitative outcomes of experiments, not environment status.
+
+    === END CONSTRAINT ===
+
+    '
+
+  lattice_metric_reporting: |
+    ## Hermes Metric Reporting (REQUIRED)
+
+    At the end of your experiment, you MUST print a metric line in this format:
+
+      METRIC: {metric_key}=<value> STATUS: improved|regressed|neutral NOTES: <one line summary>
+
+    Example:
+      METRIC: accuracy=0.923 STATUS: improved NOTES: Adam lr=0.001 converged at iter 38
+
+    Additionally, write a `results.json` file in the working directory with structured
+    experiment results. Example schema:
+
+    ```json
+    {
+      "experiment_type": "optimization",
+      "conditions": {
+        "adam": {"seed_0": {"accuracy": 0.923, "loss": 0.112}},
+        "sgd":  {"seed_0": {"accuracy": 0.871, "loss": 0.198}}
+      },
+      "metadata": {"total_runtime_sec": 47.3, "domain": "ml"}
+    }
+    ```
+
+    The supervisor reads METRIC lines and results.json to decide keep/discard.
+    Do NOT print other `key: value` lines unless they are real metrics you intend to report.
+
+stages:
+  code_generation:
+    max_tokens: 8192
+    system: You are a computational scientist who writes real, runnable experiments. Your code implements actual algorithms
+      with real mathematical operations. You NEVER fake results with random number generators. Always use the ```filename:xxx.py
+      format for each file. Use numpy for numerical computation. Keep code self-contained and deterministic.
+    user: "Generate a Python experiment project for the following research topic:\nTOPIC: {topic}\n\nCRITICAL REQUIREMENTS\
+      \ — your code MUST satisfy ALL of these:\n1. Implement REAL algorithms (e.g., gradient descent, Adam, SGD, etc.)\n \
+      \  using numpy arrays — NOT random.uniform() loops that fake results.\n2. Define REAL objective/loss functions (e.g.,\
+      \ Rosenbrock, quadratic,\n   cross-entropy on synthetic data) with proper mathematical formulas.\n3. Run REAL optimization\
+      \ loops that compute gradients and update parameters.\n4. Collect REAL metrics (loss values, convergence rates) from\
+      \ the optimization.\n5. The code must be scientifically meaningful — a reviewer should see\n   actual algorithm implementations,\n\
+      \   not random number generators.\n\nOUTPUT FORMAT — return multiple files using this exact format:\n```filename:main.py\n\
+      # entry point code\n```\n\n```filename:optimizers.py\n# optimizer implementations\n```\n\nCODE STRUCTURE:\n- main.py:\
+      \ entry point that runs experiments and prints metrics\n- Additional modules for algorithms, objective functions, utilities\n\
+      - Primary metric key: {metric}\n- main.py must print metric lines as `name: value` (one per line)\n- main.py must ALSO\
+      \ write a `results.json` file with structured experiment results\n  (e.g. per-algorithm, per-function, per-dimension metrics\
+      \ as nested dicts/lists)\n- Use deterministic seeds (numpy.random.seed or random.seed)\n- No external data files, no\
+      \ network calls, no GPU required\n- FORBIDDEN: subprocess, os.system, eval, exec, shutil, socket\n- MUST implement convergence\
+      \ stopping criteria (e.g. stop when objective change < 1e-8 for\n  N consecutive iterations) — do NOT just run a fixed\
+      \ number of iterations\n{pkg_hint}\nANTI-PATTERNS (do NOT do these):\n- Do NOT generate random numbers and pretend they\
+      \ are experiment results\n- Do NOT use `random.uniform()` to simulate a decreasing loss curve\n- Do NOT hardcode metric\
+      \ values or use trivial arithmetic as metrics\n- Do NOT run a fixed number of iterations without any convergence check\n\
+      - Do NOT implement convergence_rate or similar metrics as dummy return values\n  (e.g. returning 1.0 or a constant) —\
+      \ measure actual iterations to convergence\n- If you report convergence_rate, define it as iterations_to_convergence /\
+      \ max_iterations\n  or similar — it MUST differ between algorithms\n\nNUMPY 2.x COMPATIBILITY (CRITICAL):\n- np.trapz\
+      \ is REMOVED → use np.trapezoid\n- np.erfinv does NOT exist → use scipy.special.erfinv\n- np.bool, np.int, np.float,\
+      \ np.complex are REMOVED → use Python builtins\n- np.str, np.object are REMOVED → use str, object\n- np.math is REMOVED\
+      \ → use math module\n\nExperiment plan:\n{exp_plan}"
+
+version: '1.0'
