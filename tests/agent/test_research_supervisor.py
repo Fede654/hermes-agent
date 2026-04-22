@@ -259,7 +259,7 @@ class TestResearchSupervisorBaseline:
 
         run_dir = tmp_workspace / "test-files-001"
         assert run_dir.exists(), "run dir must be created"
-        round_dirs = list(run_dir.iterdir())
+        round_dirs = [p for p in run_dir.iterdir() if p.is_dir()]
         assert len(round_dirs) >= 1
         round_dir = round_dirs[0]
         assert (round_dir / "attempt.py").exists(), "attempt.py must be written for code tasks"
@@ -361,11 +361,56 @@ class TestResearchSupervisorBaseline:
             )
 
         run_dir = tmp_workspace / "test-search-001"
-        round_dirs = list(run_dir.iterdir())
+        round_dirs = [p for p in run_dir.iterdir() if p.is_dir()]
         assert len(round_dirs) >= 1
         round_dir = round_dirs[0]
         assert (round_dir / "attempt.md").exists(), "attempt.md must be written for search tasks"
         assert not (round_dir / "attempt.py").exists(), "attempt.py must NOT be written for search tasks"
+
+
+    def test_rollback_uses_on_disk_artifact(self, tmp_workspace: Path, mock_parent_agent: MagicMock, code_spec: TaskSpec):
+        """Fix #1 (audit): rollback restores on-disk artifact, not the seed string."""
+        call_count = 0
+        BEST_ARTIFACT = "# best on-disk version\nprint('accuracy: 0.90')"
+
+        def capturing_delegate(goal, context, toolsets, parent_agent):
+            nonlocal call_count
+            call_count += 1
+            # Find the round dir from goal string and write a modified attempt.py
+            import re as _re
+            m = _re.search(r"round-[^\s]+", goal)
+            if m:
+                rd = tmp_workspace / "test-rollback-001" / m.group(0)
+                rd.mkdir(parents=True, exist_ok=True)
+                if call_count == 1:
+                    # baseline — write a specific artifact to disk
+                    (rd / "attempt.py").write_text(BEST_ARTIFACT, encoding="utf-8")
+                    return _make_delegate_result(0.90)
+                else:
+                    # iter1 — write a worse artifact but report regression
+                    (rd / "attempt.py").write_text("# worse attempt", encoding="utf-8")
+                    return _make_delegate_result(0.70)
+            return _make_delegate_result(0.0)
+
+        mock_llm = MagicMock()
+        mock_llm.chat.return_value = MagicMock(content="```python\nprint('iter attempt')\n```")
+
+        with patch("tools.delegate_tool.delegate_task", side_effect=capturing_delegate):
+            supervisor = ResearchSupervisor(
+                parent_agent=mock_parent_agent,
+                workspace=tmp_workspace,
+            )
+            history = supervisor.run(
+                code_spec,
+                initial_attempt="# initial seed",
+                run_id="test-rollback-001",
+                max_iterations=1,
+                llm=mock_llm,
+            )
+
+        # After regression, rollback should restore the best on-disk artifact
+        assert history.best_result is not None
+        assert history.best_result.primary_metric == pytest.approx(0.90, abs=0.001)
 
 
 @pytest.mark.integration

@@ -451,6 +451,10 @@ class ResearchSupervisor:
 
         # --- ACT (baseline) ---
         baseline = runner.run_experiment(initial_attempt, run_id=run_id, iteration=0)
+        # Read on-disk artifact — worker may have modified the seed during baseline
+        baseline_artifact = self._read_artifact(spec, run_dir, baseline) or initial_attempt
+        attempt_holder[0] = baseline_artifact
+        best_artifact_holder: list[str] = [baseline_artifact]
         # --- OBSERVE ---
         self._observe(baseline, spec, run_dir)
 
@@ -468,17 +472,21 @@ class ResearchSupervisor:
             # ACT — worker executes the attempt
             result = runner.run_experiment(next_attempt, run_id=run_id, iteration=iteration)
 
+            # Read on-disk artifact — worker may have refined it beyond the seed
+            actual_artifact = self._read_artifact(spec, run_dir, result) or next_attempt
+            attempt_holder[0] = actual_artifact
+
             # OBSERVE + REMEMBER — extract and persist structured learning
             self._observe(result, spec, run_dir)
 
             # SEPL: evaluate → keep/discard (handled by ExperimentRunner)
-            # SEPL: rollback — if not improved, revert attempt to last best
+            # SEPL: rollback — restore best on-disk artifact, not the seed string
             if result.improved:
                 no_improvement = 0
+                best_artifact_holder[0] = actual_artifact
             else:
                 no_improvement += 1
-                if runner.history.best_result:
-                    attempt_holder[0] = runner.history.best_result.code  # rollback
+                attempt_holder[0] = best_artifact_holder[0]  # rollback to best artifact
 
             if no_improvement >= 3:
                 logger.info("Early stop: 3 non-improving iterations for %s", run_id)
@@ -578,9 +586,42 @@ class ResearchSupervisor:
     # Autogenesis: Observe + Remember (HeartbeatMemorySystem schema)
     # ------------------------------------------------------------------
 
+    def _read_artifact(self, spec: TaskSpec, run_dir: Path, result: ExperimentResult) -> str | None:
+        """Read the actual on-disk artifact produced by the worker.
+
+        Workers may modify attempt.py / attempt.md beyond the seed string passed in.
+        This ensures rollback restores the real artifact, not the seed text.
+        """
+        round_dir = run_dir / f"round-{result.run_id}-iter{result.iteration}"
+        attempt_filename = _ATTEMPT_FILENAME.get(spec.task_type, "attempt.md")
+        artifact_file = round_dir / attempt_filename
+        try:
+            return artifact_file.read_text(encoding="utf-8") if artifact_file.exists() else None
+        except OSError:
+            return None
+
+    @staticmethod
+    def _insight_from_json(round_dir: Path, metric_key: str) -> str:
+        """Extract a human-readable insight from results.json (structured source)."""
+        results_json = round_dir / "results.json"
+        if not results_json.exists():
+            return ""
+        try:
+            data = json.loads(results_json.read_text(encoding="utf-8"))
+            for field in ("notes", "summary", "insight", "description"):
+                val = data.get(field)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()[:200]
+            val = data.get(metric_key)
+            if val is not None:
+                return f"{metric_key}={val}"
+        except (json.JSONDecodeError, OSError):
+            pass
+        return ""
+
     def _observe(
         self,
-        result: "ExperimentResult",
+        result: ExperimentResult,
         spec: TaskSpec,
         run_dir: Path,
     ) -> None:
@@ -592,18 +633,34 @@ class ResearchSupervisor:
           insight    — one-line summary of what happened and why
           confidence — metric value (0.0 if unavailable)
           source     — "iter-N" for lineage tracing
+
+        Insight extraction priority:
+          1. results.json (structured, most reliable)
+          2. NOTES: field from METRIC line in stdout
+          3. Raw stdout excerpt (last resort)
         """
         if result.primary_metric is not None:
             entry_type = "improvement" if result.improved else "regression"
         else:
             entry_type = "failure"
 
-        insight_text = ""
-        if result.stdout:
-            # Pull the NOTES field from the METRIC line if present
+        round_dir = run_dir / f"round-{result.run_id}-iter{result.iteration}"
+
+        # 1. Structured source: results.json
+        insight_text = self._insight_from_json(round_dir, spec.metric_key)
+
+        # 2. NOTES: field from the worker's METRIC line
+        if not insight_text and result.stdout:
             m = re.search(r"NOTES:\s*(.+)", result.stdout)
-            insight_text = m.group(1).strip() if m else result.stdout[:200].replace("\n", " ")
-        elif result.error:
+            if m:
+                insight_text = m.group(1).strip()
+
+        # 3. Raw stdout excerpt
+        if not insight_text and result.stdout:
+            insight_text = result.stdout[:200].replace("\n", " ")
+
+        # 4. Error fallback
+        if not insight_text and result.error:
             insight_text = result.error[:200]
 
         entry = {
@@ -655,11 +712,19 @@ class ResearchSupervisor:
         best = history.best_result
         best_metric = best.primary_metric if best else None
 
-        if not llm or not learnings:
+        if not llm:
             lattice_comment_fn(
-                f"[reflect] Early stop: 3 non-improving. "
+                f"[reflect] Early stop after 3 non-improving rounds. "
                 f"Best {spec.metric_key}={best_metric}. "
-                f"No learnings to synthesize — re-examine hypothesis manually."
+                f"llm=None — reflection skipped. Pass an LLM client to enable diagnosis."
+            )
+            return
+
+        if not learnings:
+            lattice_comment_fn(
+                f"[reflect] Early stop after 3 non-improving rounds. "
+                f"Best {spec.metric_key}={best_metric}. "
+                f"No learnings in learnings.jsonl — re-examine hypothesis manually."
             )
             return
 
