@@ -194,6 +194,8 @@ Compute `{spec.metric_key}` from the code's output.
 - Do NOT fabricate metric values.
 - No abstractions for single-use code. If 5 lines solve it, write 5.
 - Do NOT refactor code unrelated to your hypothesis.
+- **CRITICAL: Do NOT install packages.** The sandbox denies `pip install`, `apt-get`, and similar commands. Use only Python stdlib + system libraries via `ctypes.CDLL` if you need native performance.
+- **Do NOT use `python -c` or heredoc scripts** — these trigger dangerous-command approval and will be denied.
 """
 
 
@@ -495,10 +497,19 @@ class ResearchSupervisor:
                 break
 
         best = runner.history.best_result
-        lattice_comment_fn(
-            f"Loop done: {len(runner.history.results)} rounds, "
-            f"best={best.primary_metric if best else None}"
-        )
+        # Partial recovery: if the last iteration failed but we have prior results,
+        # report as partial success instead of total failure
+        last_result = runner.history.results[-1] if runner.history.results else None
+        if last_result and last_result.primary_metric is None and best:
+            lattice_comment_fn(
+                f"Loop done (PARTIAL): {len(runner.history.results)} rounds, "
+                f"best={best.primary_metric}. Last iteration failed but prior best preserved."
+            )
+        else:
+            lattice_comment_fn(
+                f"Loop done: {len(runner.history.results)} rounds, "
+                f"best={best.primary_metric if best else None}"
+            )
         return runner.history
 
     # ------------------------------------------------------------------
@@ -663,11 +674,23 @@ class ResearchSupervisor:
         if not insight_text and result.error:
             insight_text = result.error[:200]
 
+        # Normalize confidence to 0-1 scale regardless of metric direction
+        raw_metric = result.primary_metric
+        if raw_metric is not None:
+            # For minimize metrics, invert so higher confidence = better result
+            if spec.metric_direction == "minimize":
+                # Use inverse with a small epsilon to avoid div by zero
+                confidence = round(1.0 / (1.0 + abs(raw_metric)), 6)
+            else:
+                confidence = round(min(abs(raw_metric), 1.0), 6)
+        else:
+            confidence = 0.0
+
         entry = {
             "type": entry_type,
             "key": spec.metric_key,
             "insight": insight_text or "no output",
-            "confidence": round(result.primary_metric, 6) if result.primary_metric is not None else 0.0,
+            "confidence": confidence,
             "source": f"iter-{result.iteration}",
         }
 
