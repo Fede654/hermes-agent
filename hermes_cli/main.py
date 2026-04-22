@@ -4238,6 +4238,8 @@ def _model_flow_kimi(config, current_model=""):
         _prompt_model_selection,
         _save_model_choice,
         deactivate_provider,
+        resolve_kimi_coding_runtime_credentials,
+        AuthError,
     )
     from hermes_cli.config import (
         get_env_value,
@@ -4251,21 +4253,47 @@ def _model_flow_kimi(config, current_model=""):
     key_env = pconfig.api_key_env_vars[0] if pconfig.api_key_env_vars else ""
     base_url_env = pconfig.base_url_env_var or ""
 
-    # Step 1: Check / prompt for API key
+    # Step 1: Check for credentials — prefer OAuth, then env API key, then prompt
     existing_key = ""
     for ev in pconfig.api_key_env_vars:
         existing_key = get_env_value(ev) or os.getenv(ev, "")
         if existing_key:
             break
 
-    existing_key, abort = _prompt_api_key(
-        pconfig, existing_key, provider_id=provider_id
-    )
-    if abort:
-        return
+    oauth_available = False
+    if not existing_key:
+        try:
+            oauth_creds = resolve_kimi_coding_runtime_credentials()
+            if oauth_creds.get("source") == "kimi-cli-oauth":
+                oauth_available = True
+                print(f"  {pconfig.name} OAuth: {oauth_creds['auth_file']} ✓")
+                print()
+        except AuthError:
+            pass
 
-    # Step 2: Auto-detect endpoint from key prefix
-    is_coding_plan = existing_key.startswith("sk-kimi-")
+    if not existing_key and not oauth_available:
+        print(f"No {pconfig.name} API key configured.")
+        if key_env:
+            try:
+                import getpass
+
+                new_key = getpass.getpass(f"{key_env} (or Enter to cancel): ").strip()
+            except (KeyboardInterrupt, EOFError):
+                print()
+                return
+            if not new_key:
+                print("Cancelled.")
+                return
+            save_env_value(key_env, new_key)
+            existing_key = new_key
+            print("API key saved.")
+            print()
+    elif existing_key:
+        print(f"  {pconfig.name} API key: {existing_key[:8]}... ✓")
+        print()
+
+    # Step 2: Auto-detect endpoint from key prefix or OAuth
+    is_coding_plan = oauth_available or existing_key.startswith("sk-kimi-")
     if is_coding_plan:
         effective_base = KIMI_CODE_BASE_URL
         print(f"  Detected Kimi Coding Plan key → {effective_base}")
