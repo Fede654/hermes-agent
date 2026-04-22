@@ -469,6 +469,44 @@ def auth_reset_command(args) -> None:
     count = pool.reset_statuses()
     print(f"Reset status on {count} {provider} credentials")
 
+def auth_kimi_command(args) -> None:
+    """Print a safe diagnostic summary for Kimi CLI OAuth credentials."""
+    from hermes_cli.auth import AuthError, _kimi_cli_credentials_path, _read_kimi_cli_credentials
+
+    creds_path = _kimi_cli_credentials_path()
+    print("Kimi CLI OAuth diagnostics")
+    print(f"  auth file: {creds_path}")
+
+    try:
+        raw_creds = _read_kimi_cli_credentials()
+    except Exception as exc:
+        print(f"  status: unavailable ({exc})")
+        return
+
+    access_token = str(raw_creds.get("access_token", "") or "").strip()
+    refresh_token = str(raw_creds.get("refresh_token", "") or "").strip()
+    expires_at = raw_creds.get("expires_at")
+    print(f"  file exists: {'yes' if creds_path.exists() else 'no'}")
+    print(f"  access token: {'present' if access_token else 'missing'}")
+    print(f"  refresh token: {'present' if refresh_token else 'missing'}")
+    if expires_at:
+        print(f"  expires at: {expires_at}")
+
+    try:
+        resolved = auth_mod.resolve_kimi_coding_runtime_credentials(
+            prefer_cli_oauth=True,
+            force_refresh=False,
+            allow_api_key_fallback=False,
+        )
+    except AuthError as exc:
+        print(f"  source: unavailable ({exc})")
+        return
+
+    print(f"  source: {resolved.get('source', 'unknown')}")
+    base_url = str(resolved.get("base_url", "") or "").strip()
+    if base_url:
+        print(f"  base url: {base_url}")
+
 
 def auth_status_command(args) -> None:
     provider = _normalize_provider(getattr(args, "provider", "") or "")
@@ -713,6 +751,9 @@ def auth_command(args) -> None:
         return
     if action == "spotify":
         auth_spotify_command(args)
+        return
+    if action == "kimi":
+        auth_kimi_command(args)
         return
     # No subcommand — launch interactive mode
     _interactive_auth()
