@@ -43,6 +43,10 @@ hermes_agent.egg-info/
 wandb/
 testlogs
 
+# Project-scope memory (personal workflow notes)
+MEMORY.md
+
+
 # CLI config (may contain sensitive SSH paths)
 cli-config.yaml
 

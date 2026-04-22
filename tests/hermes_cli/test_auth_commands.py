@@ -766,6 +766,59 @@ def test_auth_list_prefers_explicit_reset_time(monkeypatch, capsys):
     assert "7d 0h left" in out
 
 
+def test_auth_kimi_command_reports_oauth_diagnostics(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    kimi_path = tmp_path / ".kimi" / "credentials" / "kimi-code.json"
+    kimi_path.parent.mkdir(parents=True, exist_ok=True)
+    kimi_path.write_text(
+        json.dumps(
+            {
+                "access_token": "access-123",
+                "refresh_token": "refresh-123",
+                "expires_at": 1711234567,
+                "token_type": "Bearer",
+                "scope": "kimi-code",
+            }
+        )
+    )
+
+    monkeypatch.setattr(
+        "hermes_cli.auth._read_kimi_cli_credentials",
+        lambda: {
+            "access_token": "access-123",
+            "refresh_token": "refresh-123",
+            "expires_at": 1711234567,
+            "token_type": "Bearer",
+            "scope": "kimi-code",
+        },
+    )
+    monkeypatch.setattr(
+        "hermes_cli.auth.resolve_kimi_coding_runtime_credentials",
+        lambda **kwargs: {
+            "provider": "kimi-coding",
+            "api_key": "access-123",
+            "base_url": "https://api.kimi.com/coding/v1",
+            "source": "kimi-cli-oauth-refresh",
+            "auth_file": str(kimi_path),
+        },
+    )
+
+    from hermes_cli.auth_commands import auth_kimi_command
+
+    class _Args:
+        pass
+
+    auth_kimi_command(_Args())
+
+    out = capsys.readouterr().out
+    assert "Kimi CLI OAuth" in out
+    assert str(kimi_path) in out
+    assert "access token: present" in out
+    assert "refresh token: present" in out
+    assert "source: kimi-cli-oauth-refresh" in out
+
+
 def test_auth_remove_env_seeded_clears_env_var(tmp_path, monkeypatch):
     """Removing an env-seeded credential should also clear the env var from .env
     so the entry doesn't get re-seeded on the next load_pool() call."""
