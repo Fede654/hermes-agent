@@ -52,8 +52,8 @@ _HERMES_CORE_TOOLS = [
     "session_search",
     # Clarifying questions
     "clarify",
-    # Code execution + delegation
-    "execute_code", "delegate_task",
+    # Code execution + delegation + research loop
+    "execute_code", "delegate_task", "run_research",
     # Cronjob management
     "cronjob",
     # Cross-platform messaging (gated on gateway running via check_fn)
@@ -117,6 +117,12 @@ TOOLSETS = {
     "skills": {
         "description": "Access, create, edit, and manage skill documents with specialized instructions and knowledge",
         "tools": ["skills_list", "skill_view", "skill_manage"],
+        "includes": []
+    },
+
+    "research": {
+        "description": "Iterative self-improving research loop: run_research spawns worker subagents, scores output against a metric, and applies LLM-guided hypothesis revision across iterations (Karpathy + Autogenesis AOOR loop)",
+        "tools": ["run_research"],
         "includes": []
     },
     
