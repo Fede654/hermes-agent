@@ -481,13 +481,9 @@ def get_anthropic_key() -> str:
 # on api.kimi.com/coding.  Legacy keys from platform.moonshot.ai work on
 # api.moonshot.ai/v1 (the old default).  Auto-detect when user hasn't set
 # KIMI_BASE_URL explicitly.
-#
-# Note: the base URL intentionally has NO /v1 suffix.  The /coding endpoint
-# speaks the Anthropic Messages protocol, and the anthropic SDK appends
-# "/v1/messages" internally — so "/coding" + SDK suffix → "/coding/v1/messages"
-# (the correct target). Using "/coding/v1" here would produce
-# "/coding/v1/v1/messages" (a 404).
-KIMI_CODE_BASE_URL = "https://api.kimi.com/coding"
+KIMI_CODE_BASE_URL = "https://api.kimi.com/coding/v1"
+KIMI_CODE_CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098"
+KIMI_CODE_OAUTH_HOST = "https://auth.kimi.com"
 
 
 def _resolve_kimi_base_url(api_key: str, default_url: str, env_override: str) -> str:
@@ -564,6 +560,149 @@ def _read_kimi_cli_credentials() -> Dict[str, Any]:
     return data
 
 
+def _save_kimi_cli_credentials(tokens: Dict[str, Any]) -> Path:
+    cred_path = _kimi_cli_credentials_path()
+    cred_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = cred_path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(tokens, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.chmod(tmp_path, stat.S_IRUSR | stat.S_IWUSR)
+    tmp_path.replace(cred_path)
+    return cred_path
+
+
+def _refresh_kimi_cli_credentials(
+    tokens: Dict[str, Any],
+    *,
+    base_url: str,
+    force_refresh: bool = False,
+    timeout_seconds: float = 20.0,
+) -> Dict[str, Any]:
+    """Refresh Kimi CLI OAuth credentials and persist the updated token file."""
+    refresh_token = str(tokens.get("refresh_token", "") or "").strip()
+    access_token = str(tokens.get("access_token", "") or "").strip()
+    if not refresh_token:
+        if access_token and not force_refresh and not _kimi_oauth_token_is_expired(tokens.get("expires_at")):
+            return {
+                "provider": "kimi-coding",
+                "api_key": access_token,
+                "base_url": base_url,
+                "source": "kimi-cli-oauth",
+                "auth_file": str(_kimi_cli_credentials_path()),
+            }
+        raise AuthError(
+            "Kimi CLI OAuth credentials are missing a refresh_token. Run `kimi login` to re-authenticate.",
+            provider="kimi-coding",
+            code="kimi_oauth_missing_refresh_token",
+            relogin_required=True,
+        )
+
+    if access_token and not force_refresh and not _kimi_oauth_token_is_expired(tokens.get("expires_at")):
+        return {
+            "provider": "kimi-coding",
+            "api_key": access_token,
+            "base_url": base_url,
+            "source": "kimi-cli-oauth",
+            "auth_file": str(_kimi_cli_credentials_path()),
+        }
+
+    timeout = httpx.Timeout(max(5.0, float(timeout_seconds)))
+    with httpx.Client(timeout=timeout, headers={"Accept": "application/json"}) as client:
+        response = client.post(
+            f"{KIMI_CODE_OAUTH_HOST.rstrip('/')}/api/oauth/token",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": KIMI_CODE_CLIENT_ID,
+            },
+        )
+
+    if response.status_code != 200:
+        code = "kimi_oauth_refresh_failed"
+        message = f"Kimi token refresh failed with status {response.status_code}."
+        relogin_required = False
+        try:
+            err = response.json()
+            if isinstance(err, dict):
+                err_code = err.get("error")
+                if isinstance(err_code, str) and err_code.strip():
+                    code = err_code.strip()
+                err_desc = err.get("error_description") or err.get("message")
+                if isinstance(err_desc, str) and err_desc.strip():
+                    message = f"Kimi token refresh failed: {err_desc.strip()}"
+        except Exception:
+            pass
+        if code in {"invalid_grant", "invalid_token", "invalid_request"}:
+            relogin_required = True
+        if response.status_code in (401, 403):
+            relogin_required = True
+        raise AuthError(
+            message,
+            provider="kimi-coding",
+            code=code,
+            relogin_required=relogin_required,
+        )
+
+    try:
+        refresh_payload = response.json()
+    except Exception as exc:
+        raise AuthError(
+            "Kimi token refresh returned invalid JSON.",
+            provider="kimi-coding",
+            code="kimi_oauth_refresh_invalid_json",
+            relogin_required=True,
+        ) from exc
+
+    if not isinstance(refresh_payload, dict):
+        raise AuthError(
+            "Kimi token refresh returned an invalid payload.",
+            provider="kimi-coding",
+            code="kimi_oauth_refresh_invalid_payload",
+            relogin_required=True,
+        )
+
+    refreshed_access = refresh_payload.get("access_token")
+    if not isinstance(refreshed_access, str) or not refreshed_access.strip():
+        raise AuthError(
+            "Kimi token refresh response was missing access_token.",
+            provider="kimi-coding",
+            code="kimi_oauth_refresh_missing_access_token",
+            relogin_required=True,
+        )
+
+    next_refresh = str(refresh_payload.get("refresh_token", refresh_token) or refresh_token).strip()
+    expires_in_raw = refresh_payload.get("expires_in")
+    try:
+        expires_in = float(expires_in_raw)
+    except Exception:
+        expires_in = None
+
+    updated = dict(tokens)
+    updated["access_token"] = refreshed_access.strip()
+    updated["refresh_token"] = next_refresh
+    if expires_in is not None and expires_in > 0:
+        updated["expires_at"] = time.time() + expires_in
+        updated["expires_in"] = expires_in
+    else:
+        updated["expires_at"] = tokens.get("expires_at", time.time() + 3600)
+        updated["expires_in"] = tokens.get("expires_in", 3600)
+    scope = refresh_payload.get("scope")
+    if isinstance(scope, str) and scope.strip():
+        updated["scope"] = scope.strip()
+    token_type = refresh_payload.get("token_type")
+    if isinstance(token_type, str) and token_type.strip():
+        updated["token_type"] = token_type.strip()
+    _save_kimi_cli_credentials(updated)
+
+    return {
+        "provider": "kimi-coding",
+        "api_key": updated["access_token"],
+        "base_url": base_url,
+        "source": "kimi-cli-oauth-refresh",
+        "auth_file": str(_kimi_cli_credentials_path()),
+    }
+
+
 def _kimi_oauth_token_is_expired(expires_at: Any, skew_seconds: int = 300) -> bool:
     try:
         exp = float(expires_at)
@@ -603,6 +742,8 @@ def kimi_coding_default_headers() -> Dict[str, str]:
 def resolve_kimi_coding_runtime_credentials(
     *,
     prefer_cli_oauth: bool = True,
+    force_refresh: bool = False,
+    allow_api_key_fallback: bool = True,
 ) -> Dict[str, Any]:
     """Resolve credentials for kimi-coding, preferring Kimi CLI OAuth."""
     base_url = os.getenv("KIMI_BASE_URL", "").strip().rstrip("/")
@@ -613,7 +754,10 @@ def resolve_kimi_coding_runtime_credentials(
         try:
             creds = _read_kimi_cli_credentials()
             access_token = str(creds.get("access_token", "") or "").strip()
-            if access_token and not _kimi_oauth_token_is_expired(creds.get("expires_at")):
+            refresh_token = str(creds.get("refresh_token", "") or "").strip()
+            token_expired = _kimi_oauth_token_is_expired(creds.get("expires_at"))
+
+            if access_token and not force_refresh and not token_expired:
                 return {
                     "provider": "kimi-coding",
                     "api_key": access_token,
@@ -621,14 +765,41 @@ def resolve_kimi_coding_runtime_credentials(
                     "source": "kimi-cli-oauth",
                     "auth_file": str(_kimi_cli_credentials_path()),
                 }
-            logger.debug(
-                "Kimi CLI OAuth token expired (expires_at=%s). "
-                "Run 'kimi login' to refresh.",
-                creds.get("expires_at"),
+
+            if refresh_token:
+                return _refresh_kimi_cli_credentials(
+                    creds,
+                    base_url=base_url,
+                    force_refresh=force_refresh or token_expired or not access_token,
+                )
+
+            if access_token and not force_refresh:
+                return {
+                    "provider": "kimi-coding",
+                    "api_key": access_token,
+                    "base_url": base_url,
+                    "source": "kimi-cli-oauth",
+                    "auth_file": str(_kimi_cli_credentials_path()),
+                }
+
+            raise AuthError(
+                "Kimi CLI OAuth credentials are not usable. Run 'kimi login' to refresh them.",
+                provider="kimi-coding",
+                code="kimi_oauth_credentials_unusable",
+                relogin_required=True,
             )
         except AuthError:
-            logger.debug("Kimi CLI OAuth not available, falling back to API key.")
+            if not allow_api_key_fallback:
+                raise
+            logger.debug("Kimi CLI OAuth unavailable, falling back to API key.")
         except Exception as exc:
+            if not allow_api_key_fallback:
+                raise AuthError(
+                    f"Kimi CLI OAuth read failed: {exc}",
+                    provider="kimi-coding",
+                    code="kimi_oauth_read_failed",
+                    relogin_required=True,
+                ) from exc
             logger.debug("Kimi CLI OAuth read failed: %s", exc)
 
     api_key = os.getenv("KIMI_API_KEY", "").strip()

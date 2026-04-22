@@ -1,6 +1,7 @@
 """Tests for API-key provider support (z.ai/GLM, Kimi, MiniMax, AI Gateway)."""
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +19,7 @@ from hermes_cli.auth import (
     STEPFUN_STEP_PLAN_INTL_BASE_URL,
     STEPFUN_STEP_PLAN_CN_BASE_URL,
     _resolve_kimi_base_url,
+    resolve_kimi_coding_runtime_credentials,
 )
 from hermes_cli.copilot_auth import _try_gh_cli_token
 
@@ -1023,6 +1025,66 @@ class TestZaiEndpointAutoDetect:
         monkeypatch.setattr("hermes_cli.auth.detect_zai_endpoint", lambda *a, **kw: None)
         creds = resolve_api_key_provider_credentials("zai")
         assert creds["api_key"] == ""
+
+
+class TestKimiCliOAuthRefresh:
+    def test_force_refresh_uses_refresh_token_and_persists_updated_file(self, monkeypatch):
+        from hermes_cli import auth as auth_mod
+
+        saved = {}
+
+        def _fake_read():
+            return {
+                "access_token": "old-access",
+                "refresh_token": "old-refresh",
+                "expires_at": 1,
+                "scope": "kimi-code",
+                "token_type": "Bearer",
+            }
+
+        class _DummyResponse:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {
+                    "access_token": "new-access",
+                    "refresh_token": "new-refresh",
+                    "expires_in": 7200,
+                    "scope": "kimi-code",
+                    "token_type": "Bearer",
+                }
+
+        class _DummyClient:
+            def __init__(self, *args, **kwargs):
+                self.calls = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def post(self, url, headers=None, data=None):
+                self.calls.append((url, headers, data))
+                return _DummyResponse()
+
+        def _fake_save(tokens):
+            saved.update(tokens)
+            return Path("/tmp/kimi-code.json")
+
+        monkeypatch.setattr(auth_mod, "_read_kimi_cli_credentials", _fake_read)
+        monkeypatch.setattr(auth_mod, "_save_kimi_cli_credentials", _fake_save)
+        monkeypatch.setattr(auth_mod.httpx, "Client", _DummyClient)
+
+        creds = resolve_kimi_coding_runtime_credentials(force_refresh=True, allow_api_key_fallback=False)
+
+        assert creds["source"] == "kimi-cli-oauth-refresh"
+        assert creds["api_key"] == "new-access"
+        assert creds["base_url"] == "https://api.kimi.com/coding/v1"
+        assert saved["access_token"] == "new-access"
+        assert saved["refresh_token"] == "new-refresh"
+        assert saved["scope"] == "kimi-code"
 
 
 # =============================================================================
