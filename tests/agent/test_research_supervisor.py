@@ -27,7 +27,8 @@ from agent.research_runner import (
 from agent.research_metrics import UniversalMetricParser
 from agent.research_supervisor import (
     ResearchSupervisor,
-    _build_program_md,
+    TaskSpec,
+    _build_task_brief,
     _extract_iteration,
 )
 
@@ -36,39 +37,85 @@ from agent.research_supervisor import (
 # Unit tests (no integration mark needed)
 # ---------------------------------------------------------------------------
 
-class TestBuildProgramMd:
-    def test_contains_topic_and_metric(self):
-        md = _build_program_md(
+class TestBuildTaskBrief:
+    def _code_spec(self, **kwargs) -> TaskSpec:
+        defaults = dict(
             topic="optimizer comparison",
-            hypothesis="Adam converges faster than SGD",
+            deliverable="Python comparison of Adam vs SGD on MNIST",
             metric_key="accuracy",
             metric_direction="maximize",
-            time_budget_sec=120,
+            task_type="code",
+            hypothesis="Adam converges faster than SGD",
+        )
+        defaults.update(kwargs)
+        return TaskSpec(**defaults)
+
+    def test_contains_topic_and_metric(self):
+        spec = self._code_spec()
+        md = _build_task_brief(
+            spec,
             iteration=1,
             round_dir="/tmp/round-001-iter1",
+            time_budget_sec=120,
         )
         assert "optimizer comparison" in md
-        assert "Adam converges faster than SGD" in md
         assert "accuracy" in md
-        assert "maximize" in md
+        assert "higher" in md  # metric_direction="maximize" renders as "higher"
         assert "120" in md
-        assert "iteration 1" in md
         assert "METRIC: accuracy=<value>" in md
 
     def test_contains_time_guard_instructions(self):
-        md = _build_program_md(
-            topic="t", hypothesis="h", metric_key="loss", metric_direction="minimize",
-            time_budget_sec=60, iteration=0, round_dir="/tmp/rd",
+        spec = TaskSpec(
+            topic="t", deliverable="d", metric_key="loss",
+            metric_direction="minimize", task_type="code",
         )
+        md = _build_task_brief(spec, iteration=0, round_dir="/tmp/rd", time_budget_sec=60)
         assert "TIME_ESTIMATE" in md
         assert "80%" in md
 
     def test_iteration_zero_is_baseline(self):
-        md = _build_program_md(
-            topic="t", hypothesis="h", metric_key="m", metric_direction="maximize",
-            time_budget_sec=300, iteration=0, round_dir="/tmp/rd",
+        spec = self._code_spec()
+        md = _build_task_brief(spec, iteration=0, round_dir="/tmp/rd", time_budget_sec=300)
+        assert "Establish a baseline" in md
+
+    def test_iteration_positive_is_improve(self):
+        spec = self._code_spec()
+        md = _build_task_brief(spec, iteration=2, round_dir="/tmp/rd", time_budget_sec=300)
+        assert "Improve" in md
+
+    def test_search_task_brief(self):
+        spec = TaskSpec(
+            topic="Find attention mechanism papers",
+            deliverable="Ranked list of papers",
+            metric_key="relevance_score",
+            task_type="search",
         )
-        assert "iteration 0" in md
+        md = _build_task_brief(spec, iteration=0, round_dir="/tmp/rd", time_budget_sec=120)
+        assert "Search" in md
+        assert "relevance_score" in md
+        assert "attempt.md" in md
+
+    def test_research_task_brief(self):
+        spec = TaskSpec(
+            topic="State of diffusion models",
+            deliverable="Technical synthesis",
+            metric_key="completeness_score",
+            task_type="research",
+        )
+        md = _build_task_brief(spec, iteration=0, round_dir="/tmp/rd", time_budget_sec=300)
+        assert "Research" in md
+        assert "completeness_score" in md
+
+    def test_generic_task_brief(self):
+        spec = TaskSpec(
+            topic="Optimize search latency",
+            deliverable="Modified implementation",
+            metric_key="latency_ms",
+            metric_direction="minimize",
+            task_type="generic",
+        )
+        md = _build_task_brief(spec, iteration=0, round_dir="/tmp/rd", time_budget_sec=300)
+        assert "latency_ms" in md
 
 
 class TestExtractIteration:
@@ -156,11 +203,23 @@ def mock_parent_agent() -> MagicMock:
     return agent
 
 
+@pytest.fixture()
+def code_spec() -> TaskSpec:
+    return TaskSpec(
+        topic="Optimizer comparison on MNIST",
+        deliverable="Python script comparing Adam vs SGD with accuracy metric",
+        metric_key="accuracy",
+        metric_direction="maximize",
+        task_type="code",
+        hypothesis="Adam converges faster than SGD",
+    )
+
+
 @pytest.mark.integration
 class TestResearchSupervisorBaseline:
     """Full loop with a mocked delegate_task — no real subagent spawned."""
 
-    def test_baseline_only_no_llm(self, tmp_workspace: Path, mock_parent_agent: MagicMock):
+    def test_baseline_only_no_llm(self, tmp_workspace: Path, mock_parent_agent: MagicMock, code_spec: TaskSpec):
         """Supervisor runs baseline experiment, returns history with 1 result."""
         metric_value = 0.85
 
@@ -170,12 +229,9 @@ class TestResearchSupervisorBaseline:
                 workspace=tmp_workspace,
             )
             history = supervisor.run(
-                topic="Optimizer comparison on MNIST",
-                hypothesis="SGD with momentum beats vanilla SGD",
-                initial_code="print('accuracy: 0.85')",
+                code_spec,
+                initial_attempt="print('accuracy: 0.85')",
                 run_id="test-baseline-001",
-                metric_key="accuracy",
-                metric_direction="maximize",
                 max_iterations=3,
                 time_budget_sec=60,
                 llm=None,  # baseline only
@@ -187,57 +243,48 @@ class TestResearchSupervisorBaseline:
         assert history.results[0].primary_metric == pytest.approx(metric_value, abs=0.001)
         assert history.results[0].kept is True  # first result always kept
 
-    def test_program_md_written_to_round_dir(self, tmp_workspace: Path, mock_parent_agent: MagicMock):
-        """Supervisor must write program.md and main.py before calling delegate_task."""
-        written_dirs: list[Path] = []
-
-        def capturing_delegate(goal, context, toolsets, parent_agent):
-            # Find the round dir from goal string
-            parts = goal.split("in ")
-            if len(parts) > 1:
-                rd = Path(parts[-1].split("\n")[0].strip())
-                if rd.exists():
-                    written_dirs.append(rd)
-            return _make_delegate_result(0.75)
-
-        with patch("tools.delegate_tool.delegate_task", side_effect=capturing_delegate):
+    def test_task_brief_written_to_round_dir(self, tmp_workspace: Path, mock_parent_agent: MagicMock, code_spec: TaskSpec):
+        """Supervisor must write task_brief.md and attempt.py before calling delegate_task."""
+        with patch("tools.delegate_tool.delegate_task", return_value=_make_delegate_result(0.75)):
             supervisor = ResearchSupervisor(
                 parent_agent=mock_parent_agent,
                 workspace=tmp_workspace,
             )
             supervisor.run(
-                topic="Test topic",
-                hypothesis="H1",
-                initial_code="# baseline code\nprint('accuracy: 0.75')",
+                code_spec,
+                initial_attempt="# baseline code\nprint('accuracy: 0.75')",
                 run_id="test-files-001",
-                metric_key="accuracy",
                 llm=None,
             )
 
-        # The round dir should have been created
-        round_dirs = list((tmp_workspace / "test-files-001").iterdir())
+        run_dir = tmp_workspace / "test-files-001"
+        assert run_dir.exists(), "run dir must be created"
+        round_dirs = list(run_dir.iterdir())
         assert len(round_dirs) >= 1
         round_dir = round_dirs[0]
-        assert (round_dir / "main.py").exists(), "main.py must be written by supervisor"
-        assert (round_dir / "program.md").exists(), "program.md must be written by supervisor"
-        program_md = (round_dir / "program.md").read_text()
-        assert "Test topic" in program_md
-        assert "H1" in program_md
-        assert "accuracy" in program_md
+        assert (round_dir / "attempt.py").exists(), "attempt.py must be written for code tasks"
+        assert (round_dir / "task_brief.md").exists(), "task_brief.md must be written by supervisor"
+        brief = (round_dir / "task_brief.md").read_text()
+        assert "Optimizer comparison on MNIST" in brief
+        assert "accuracy" in brief
 
     def test_failed_worker_records_error(self, tmp_workspace: Path, mock_parent_agent: MagicMock):
         """When delegate_task returns failed status, result has error and is not kept."""
+        spec = TaskSpec(
+            topic="Crash test",
+            deliverable="code that fails",
+            metric_key="accuracy",
+            task_type="code",
+        )
         with patch("tools.delegate_tool.delegate_task", return_value=_make_failed_delegate_result("Worker crashed")):
             supervisor = ResearchSupervisor(
                 parent_agent=mock_parent_agent,
                 workspace=tmp_workspace,
             )
             history = supervisor.run(
-                topic="Crash test",
-                hypothesis="Will fail",
-                initial_code="raise RuntimeError('oops')",
+                spec,
+                initial_attempt="raise RuntimeError('oops')",
                 run_id="test-fail-001",
-                metric_key="accuracy",
                 llm=None,
             )
 
@@ -247,38 +294,56 @@ class TestResearchSupervisorBaseline:
         assert result.kept is False
         assert result.primary_metric is None
 
-    def test_lattice_comment_fn_called(self, tmp_workspace: Path, mock_parent_agent: MagicMock):
+    def test_lattice_comment_fn_called(self, tmp_workspace: Path, mock_parent_agent: MagicMock, code_spec: TaskSpec):
         """Lattice comment function is called at loop start and end."""
-        comments: list[str] = []
-
         with patch("tools.delegate_tool.delegate_task", return_value=_make_delegate_result(0.9)):
             supervisor = ResearchSupervisor(
                 parent_agent=mock_parent_agent,
                 workspace=tmp_workspace,
             )
-            # Patch the comment fn after construction
             supervisor._lattice_task_id = None  # stub mode — logs only
             history = supervisor.run(
-                topic="Comment test",
-                hypothesis="H",
-                initial_code="pass",
+                code_spec,
+                initial_attempt="pass",
                 run_id="test-comment-001",
-                metric_key="accuracy",
                 llm=None,
             )
 
-        # Just check we got a result — comment fn stubbed to logger
         assert len(history.results) == 1
+
+    def test_search_task_writes_attempt_md(self, tmp_workspace: Path, mock_parent_agent: MagicMock):
+        """Search tasks write attempt.md, not attempt.py."""
+        spec = TaskSpec(
+            topic="Find papers on transformers",
+            deliverable="Ranked list of papers",
+            metric_key="relevance_score",
+            task_type="search",
+        )
+        with patch("tools.delegate_tool.delegate_task", return_value=_make_delegate_result(0.8, "relevance_score")):
+            supervisor = ResearchSupervisor(
+                parent_agent=mock_parent_agent,
+                workspace=tmp_workspace,
+            )
+            supervisor.run(
+                spec,
+                initial_attempt="search query: transformer papers after 2022",
+                run_id="test-search-001",
+                llm=None,
+            )
+
+        run_dir = tmp_workspace / "test-search-001"
+        round_dirs = list(run_dir.iterdir())
+        assert len(round_dirs) >= 1
+        round_dir = round_dirs[0]
+        assert (round_dir / "attempt.md").exists(), "attempt.md must be written for search tasks"
+        assert not (round_dir / "attempt.py").exists(), "attempt.py must NOT be written for search tasks"
 
 
 @pytest.mark.integration
 class TestResearchSupervisorIterations:
     """Multi-iteration loop with a mock LLM client."""
 
-    def _make_mock_llm(self, improved_metrics: list[float]) -> MagicMock:
-        """Mock LLM that returns trivially modified code each iteration."""
-        call_count = 0
-
+    def _make_mock_llm(self) -> MagicMock:
         class MockResponse:
             content = "```python\nprint('updated code')\n```"
 
@@ -294,7 +359,14 @@ class TestResearchSupervisorIterations:
             val = next(metric_sequence, 0.80)
             return _make_delegate_result(val)
 
-        mock_llm = self._make_mock_llm([0.70, 0.82, 0.81])
+        spec = TaskSpec(
+            topic="Improvement test",
+            deliverable="Adam should converge better",
+            metric_key="accuracy",
+            metric_direction="maximize",
+            task_type="code",
+        )
+        mock_llm = self._make_mock_llm()
 
         with patch("tools.delegate_tool.delegate_task", side_effect=side_effect):
             supervisor = ResearchSupervisor(
@@ -302,12 +374,9 @@ class TestResearchSupervisorIterations:
                 workspace=tmp_workspace,
             )
             history = supervisor.run(
-                topic="Improvement test",
-                hypothesis="Adam should converge better",
-                initial_code="# initial",
+                spec,
+                initial_attempt="# initial",
                 run_id="test-iter-001",
-                metric_key="accuracy",
-                metric_direction="maximize",
                 max_iterations=5,
                 llm=mock_llm,
             )
@@ -320,7 +389,6 @@ class TestResearchSupervisorIterations:
 
     def test_early_stop_on_no_improvement(self, tmp_workspace: Path, mock_parent_agent: MagicMock):
         """Loop stops early after 3 consecutive non-improving iterations."""
-        # Baseline + 3 non-improvements → early stop (total 4 calls)
         call_count = 0
 
         def side_effect(goal, context, toolsets, parent_agent):
@@ -330,6 +398,13 @@ class TestResearchSupervisorIterations:
                 return _make_delegate_result(0.5)   # baseline
             return _make_delegate_result(0.4)        # always regress
 
+        spec = TaskSpec(
+            topic="Early stop test",
+            deliverable="This will not improve",
+            metric_key="accuracy",
+            metric_direction="maximize",
+            task_type="code",
+        )
         mock_llm = MagicMock()
         mock_llm.chat.return_value = MagicMock(content="```python\npass\n```")
 
@@ -339,12 +414,9 @@ class TestResearchSupervisorIterations:
                 workspace=tmp_workspace,
             )
             history = supervisor.run(
-                topic="Early stop test",
-                hypothesis="This will not improve",
-                initial_code="# bad code",
+                spec,
+                initial_attempt="# bad code",
                 run_id="test-early-001",
-                metric_key="accuracy",
-                metric_direction="maximize",
                 max_iterations=10,
                 llm=mock_llm,
             )
