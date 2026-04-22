@@ -104,8 +104,8 @@ class TaskSpec:
     # Worker toolset hints per task type (overridable in ResearchSupervisor.run)
     _DEFAULT_TOOLSETS: dict[str, list[str]] = field(default_factory=lambda: {
         "code":     ["terminal", "file"],
-        "search":   ["web", "file"],
-        "research": ["web", "file"],
+        "search":   ["web", "terminal", "file"],
+        "research": ["web", "terminal", "file"],
         "generic":  ["terminal", "file"],
     }, repr=False)
 
