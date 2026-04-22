@@ -1,12 +1,20 @@
 """ResearchSupervisor — Karpathy inner loop for any task with a measurable deliverable.
 
-The loop is domain-agnostic:
-  1. SPECIFY    — TaskSpec describes what to produce and how to measure it
-  2. ATTEMPT    — worker produces a deliverable (code, search results, research synthesis, ...)
-  3. MEASURE    — metric extracted from worker output or scored by an LLM judge
-  4. KEEP/DISCARD — ExperimentRunner keeps improvements, discards regressions
-  5. HYPOTHESIZE — supervisor proposes a revised approach based on history
-  6. ITERATE    — repeat until budget exhausted or 3 non-improving rounds
+Implements the Autogenesis self-evolution loop (Act → Observe → Optimize → Remember)
+applied to any task with a measurable deliverable:
+
+  Phase     | Autogenesis concept  | Implementation
+  --------- | -------------------- | --------------
+  ACT       | Agent produces output | worker via delegate_task
+  OBSERVE   | Capture outcome + traces | _observe() → learnings.jsonl
+  OPTIMIZE  | Propose next hypothesis | _improve_attempt() (reflection optimizer)
+  REMEMBER  | Persist insights for future rounds | learnings.jsonl (HeartbeatMemorySystem schema)
+
+The SEPL (Self Evolution Protocol Layer) materializes as:
+  - propose: _improve_attempt() drafts the next attempt
+  - evaluate: ExperimentRunner scores and keep/discards
+  - commit: kept results update best_result + lineage in ExperimentHistory
+  - rollback: discarded results revert attempt_holder to prior best
 
 Supported task types: "code" | "search" | "research" | "generic"
 Evaluation modes:     "self_report" | "llm_judge"
@@ -16,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time as _time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,6 +33,7 @@ from typing import Any, Callable, Optional
 from agent.research_runner import (
     DelegateSandboxResult,
     ExperimentHistory,
+    ExperimentResult,
     ExperimentRunner,
     HermesExperimentConfig,
 )
@@ -433,36 +443,47 @@ class ResearchSupervisor:
             lattice_comment_fn=lattice_comment_fn,
         )
 
+        run_dir = self._workspace / run_id
         lattice_comment_fn(
             f"Loop started: run_id={run_id} type={spec.task_type} "
             f"metric={spec.metric_key} topic={spec.topic[:50]}"
         )
 
-        # Baseline
-        runner.run_experiment(initial_attempt, run_id=run_id, iteration=0)
+        # --- ACT (baseline) ---
+        baseline = runner.run_experiment(initial_attempt, run_id=run_id, iteration=0)
+        # --- OBSERVE ---
+        self._observe(baseline, spec, run_dir)
 
         if llm is None:
             lattice_comment_fn(f"Baseline only. best={runner.history.baseline_metric}")
             return runner.history
 
-        # Improvement loop
+        # Autogenesis AOOR improvement loop
         no_improvement = 0
         for iteration in range(1, max_iterations + 1):
+            # OPTIMIZE — propose revised attempt (SEPL: propose)
             next_attempt = self._improve_attempt(llm, spec, attempt_holder[0], runner.history)
             attempt_holder[0] = next_attempt
+
+            # ACT — worker executes the attempt
             result = runner.run_experiment(next_attempt, run_id=run_id, iteration=iteration)
 
+            # OBSERVE + REMEMBER — extract and persist structured learning
+            self._observe(result, spec, run_dir)
+
+            # SEPL: evaluate → keep/discard (handled by ExperimentRunner)
+            # SEPL: rollback — if not improved, revert attempt to last best
             if result.improved:
                 no_improvement = 0
             else:
                 no_improvement += 1
+                if runner.history.best_result:
+                    attempt_holder[0] = runner.history.best_result.code  # rollback
 
             if no_improvement >= 3:
                 logger.info("Early stop: 3 non-improving iterations for %s", run_id)
-                lattice_comment_fn(
-                    f"Early stop after {iteration} iterations (3 non-improving). "
-                    f"Diagnosis: hypothesis may be wrong, not iteration count."
-                )
+                # SEPL: reflection optimizer — synthesize before giving up
+                self._reflect(runner.history, spec, llm, lattice_comment_fn, run_dir)
                 break
 
         best = runner.history.best_result
@@ -554,7 +575,146 @@ class ResearchSupervisor:
         )
 
     # ------------------------------------------------------------------
-    # Improvement proposal (Karpathy principles applied)
+    # Autogenesis: Observe + Remember (HeartbeatMemorySystem schema)
+    # ------------------------------------------------------------------
+
+    def _observe(
+        self,
+        result: "ExperimentResult",
+        spec: TaskSpec,
+        run_dir: Path,
+    ) -> None:
+        """Extract a structured learning from a completed round and append to learnings.jsonl.
+
+        Schema mirrors Autogenesis HeartbeatMemorySystem:
+          type       — "improvement" | "regression" | "failure"
+          key        — metric name being optimized
+          insight    — one-line summary of what happened and why
+          confidence — metric value (0.0 if unavailable)
+          source     — "iter-N" for lineage tracing
+        """
+        if result.primary_metric is not None:
+            entry_type = "improvement" if result.improved else "regression"
+        else:
+            entry_type = "failure"
+
+        insight_text = ""
+        if result.stdout:
+            # Pull the NOTES field from the METRIC line if present
+            m = re.search(r"NOTES:\s*(.+)", result.stdout)
+            insight_text = m.group(1).strip() if m else result.stdout[:200].replace("\n", " ")
+        elif result.error:
+            insight_text = result.error[:200]
+
+        entry = {
+            "type": entry_type,
+            "key": spec.metric_key,
+            "insight": insight_text or "no output",
+            "confidence": round(result.primary_metric, 6) if result.primary_metric is not None else 0.0,
+            "source": f"iter-{result.iteration}",
+        }
+
+        run_dir.mkdir(parents=True, exist_ok=True)
+        learnings_file = run_dir / "learnings.jsonl"
+        with learnings_file.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+
+        logger.debug(
+            "[observe] iter=%d type=%s %s=%.4f insight=%s",
+            result.iteration, entry_type, spec.metric_key,
+            entry["confidence"], insight_text[:80],
+        )
+
+    # ------------------------------------------------------------------
+    # Autogenesis: Reflect (SEPL reflection optimizer on early stop)
+    # ------------------------------------------------------------------
+
+    def _reflect(
+        self,
+        history: "ExperimentHistory",
+        spec: TaskSpec,
+        llm: Any,
+        lattice_comment_fn: "Callable[[str], None]",
+        run_dir: Path,
+    ) -> None:
+        """Synthesis pass after 3 non-improving iterations.
+
+        Reads learnings.jsonl, asks the LLM to diagnose why the metric stalled,
+        and posts the diagnosis to Lattice. This is the SEPL reflection optimizer:
+        instead of iterating blindly, we re-examine whether the hypothesis was wrong.
+        """
+        learnings_file = run_dir / "learnings.jsonl"
+        learnings: list[dict[str, Any]] = []
+        if learnings_file.exists():
+            for line in learnings_file.read_text(encoding="utf-8").splitlines():
+                try:
+                    learnings.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+
+        best = history.best_result
+        best_metric = best.primary_metric if best else None
+
+        if not llm or not learnings:
+            lattice_comment_fn(
+                f"[reflect] Early stop: 3 non-improving. "
+                f"Best {spec.metric_key}={best_metric}. "
+                f"No learnings to synthesize — re-examine hypothesis manually."
+            )
+            return
+
+        learnings_summary = "\n".join(
+            f"- iter {e['source']}: {e['type']} | {e['key']}={e['confidence']} | {e['insight']}"
+            for e in learnings
+        )
+
+        prompt = (
+            f"A research loop ran {len(learnings)} iterations on the following task:\n\n"
+            f"Topic: {spec.topic}\n"
+            f"Deliverable: {spec.deliverable}\n"
+            f"Metric: {spec.metric_key} ({spec.metric_direction})\n"
+            f"Best achieved: {best_metric}\n\n"
+            f"Round-by-round observations:\n{learnings_summary}\n\n"
+            "The loop stopped because 3 consecutive iterations did not improve the metric.\n\n"
+            "Diagnose:\n"
+            "1. Why did the metric stall? What is the fundamental bottleneck?\n"
+            "2. Was the hypothesis wrong — or was the approach right but the budget too small?\n"
+            "3. What ONE different approach would you try next if given another budget?\n\n"
+            "Be specific and concise. This diagnosis will be posted to the task tracker."
+        )
+
+        try:
+            response = llm.chat(
+                [{"role": "user", "content": prompt}],
+                system=(
+                    "You are an expert research diagnostician. "
+                    "Identify root causes, not symptoms. Be concrete and actionable."
+                ),
+            )
+            diagnosis = getattr(response, "content", "").strip()[:1000]
+        except Exception as exc:
+            logger.warning("Reflection LLM call failed: %s", exc)
+            diagnosis = f"LLM reflection failed: {exc}"
+
+        lattice_comment_fn(
+            f"[reflect] Early stop after {len(learnings)} rounds. "
+            f"Best {spec.metric_key}={best_metric}.\n\n"
+            f"Diagnosis:\n{diagnosis}"
+        )
+
+        # Persist the reflection as a special learning entry
+        reflection_entry = {
+            "type": "reflection",
+            "key": spec.metric_key,
+            "insight": diagnosis[:500],
+            "confidence": best_metric or 0.0,
+            "source": "reflect-final",
+        }
+        with learnings_file.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(reflection_entry) + "\n")
+
+    # ------------------------------------------------------------------
+    # Autogenesis: Optimize — improvement proposal (Karpathy principles)
     # ------------------------------------------------------------------
 
     def _improve_attempt(

@@ -311,6 +311,35 @@ class TestResearchSupervisorBaseline:
 
         assert len(history.results) == 1
 
+    def test_learnings_jsonl_written(self, tmp_workspace: Path, mock_parent_agent: MagicMock, code_spec: TaskSpec):
+        """Autogenesis Observe step: learnings.jsonl is written with HeartbeatMemorySystem schema."""
+        with patch("tools.delegate_tool.delegate_task", return_value=_make_delegate_result(0.88)):
+            supervisor = ResearchSupervisor(
+                parent_agent=mock_parent_agent,
+                workspace=tmp_workspace,
+            )
+            supervisor.run(
+                code_spec,
+                initial_attempt="print('accuracy: 0.88')",
+                run_id="test-learnings-001",
+                llm=None,
+            )
+
+        learnings_file = tmp_workspace / "test-learnings-001" / "learnings.jsonl"
+        assert learnings_file.exists(), "learnings.jsonl must be written by _observe()"
+        lines = [json.loads(l) for l in learnings_file.read_text().splitlines() if l.strip()]
+        assert len(lines) == 1  # one entry per iteration
+        entry = lines[0]
+        # Verify HeartbeatMemorySystem schema
+        assert "type" in entry
+        assert "key" in entry
+        assert "insight" in entry
+        assert "confidence" in entry
+        assert "source" in entry
+        assert entry["key"] == "accuracy"
+        assert entry["type"] in ("improvement", "regression", "failure")
+        assert entry["source"] == "iter-0"
+
     def test_search_task_writes_attempt_md(self, tmp_workspace: Path, mock_parent_agent: MagicMock):
         """Search tasks write attempt.md, not attempt.py."""
         spec = TaskSpec(
