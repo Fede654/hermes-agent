@@ -194,8 +194,8 @@ Compute `{spec.metric_key}` from the code's output.
 - Do NOT fabricate metric values.
 - No abstractions for single-use code. If 5 lines solve it, write 5.
 - Do NOT refactor code unrelated to your hypothesis.
-- **CRITICAL: Do NOT install packages.** The sandbox denies `pip install`, `apt-get`, and similar commands. Use only Python stdlib + system libraries via `ctypes.CDLL` if you need native performance.
-- **Do NOT use `python -c` or heredoc scripts** — these trigger dangerous-command approval and will be denied.
+- **Package installation:** `pip install` is NOT blocked but may fail if the package isn't available. If you need a library, first check if it's already installed. If not, use `ctypes.CDLL` with system libraries (e.g., `/usr/lib/x86_64-linux-gnu/libgmp.so.10`) or write a pure-Python alternative.
+- **You MAY use `python -c` and heredoc scripts** — these are allowed in your environment.
 """
 
 
