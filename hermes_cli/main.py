@@ -10675,6 +10675,16 @@ Examples:
         help="Scaffold template to apply (default: profile name). Available: researcher",
     )
 
+    profile_setup = profile_subparsers.add_parser(
+        "setup", help="Apply a scaffold template to an existing profile"
+    )
+    profile_setup.add_argument("profile_name", help="Profile to configure")
+    profile_setup.add_argument(
+        "--template",
+        metavar="TEMPLATE",
+        help="Scaffold template to apply (default: profile name). Available: researcher",
+    )
+
     profile_delete = profile_subparsers.add_parser("delete", help="Delete a profile")
     profile_delete.add_argument("profile_name", help="Profile to delete")
     profile_delete.add_argument(
