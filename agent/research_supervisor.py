@@ -196,6 +196,12 @@ Compute `{spec.metric_key}` from the code's output.
 - Do NOT refactor code unrelated to your hypothesis.
 - **Package installation:** `pip install` is NOT blocked but may fail if the package isn't available. If you need a library, first check if it's already installed. If not, use `ctypes.CDLL` with system libraries (e.g., `/usr/lib/x86_64-linux-gnu/libgmp.so.10`) or write a pure-Python alternative.
 - **You MAY use `python -c` and heredoc scripts** — these are allowed in your environment.
+- **Tool format:** When calling tools, use the JSON format provided by the system. Do NOT use XML tags like `<function_calls>`.
+
+## Tools Available
+
+You have access to: `terminal` (shell commands), `file` (read/write), `code_execution` (Python scripts), and `search` (web search).
+If a task requires running code, use `terminal()` or `code_execution()` — do NOT assume they are unavailable.
 """
 
 
@@ -228,6 +234,12 @@ Score your results for `{spec.metric_key}` on a 0.0–1.0 scale.
 - Do NOT fabricate relevance scores.
 - Each search iteration must test exactly one new hypothesis about where better results are.
 - Save your full result set to `results.json` with `{{"{spec.metric_key}": <score>}}`.
+- **Tool format:** When calling tools, use the JSON format provided by the system. Do NOT use XML tags like `<function_calls>`.
+
+## Tools Available
+
+You have access to: `web_search` (find papers/articles), `browser` (visit pages), `file` (read/write), and `terminal` (shell commands for data processing).
+Use these actively — do NOT assume they are unavailable.
 """
 
 
@@ -260,6 +272,12 @@ Rate your synthesis on `{spec.metric_key}` (0.0–1.0).
 - Do NOT fabricate facts, citations, or scores.
 - Each iteration must address exactly ONE identified gap — not rewrite everything.
 - Save synthesis to `attempt.md` and score to `results.json`.
+- **Tool format:** When calling tools, use the JSON format provided by the system. Do NOT use XML tags like `<function_calls>`.
+
+## Tools Available
+
+You have access to: `web_search` (research topics), `browser` (deep reading), `file` (read/write), and `terminal` (data processing).
+Use these actively — do NOT assume they are unavailable.
 """
 
 
@@ -291,6 +309,12 @@ Compute `{spec.metric_key}` as a number from your deliverable.
 - Do NOT fabricate metric values.
 - Minimum effort that moves the metric. No speculative additions.
 - Save deliverable to `attempt.md`, score to `results.json`.
+- **Tool format:** When calling tools, use the JSON format provided by the system. Do NOT use XML tags like `<function_calls>`.
+
+## Tools Available
+
+You have access to: `terminal` (shell), `file` (read/write), `code_execution` (Python), `web_search`, and `browser`.
+Use these actively — do NOT assume they are unavailable.
 """
 
 
