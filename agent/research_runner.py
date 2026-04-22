@@ -281,13 +281,34 @@ class ExperimentRunner:
             "```python\n"
             f"{current_code}\n"
             "```\n\n"
-            "Return only the updated Python code."
+            "## Think Before Coding\n\n"
+            "Before writing any code:\n"
+            "1. State WHY the current metric is at the level it is "
+            "(what is the binding bottleneck?).\n"
+            "2. State your ONE hypothesis for what change will move the metric. "
+            "If uncertain between approaches, pick the simpler one.\n"
+            "3. Define your success criterion: "
+            f"'{self.config.metric_key} should move from {last_metric} toward "
+            f"{'higher' if direction == 'maximize' else 'lower'} by a measurable amount'.\n\n"
+            "## Surgical Changes\n\n"
+            "- Change only what your hypothesis requires. "
+            "Do not refactor unrelated code.\n"
+            "- Every changed line must trace directly to your hypothesis.\n"
+            "- If the fix is 5 lines, write 5 lines — not 50.\n"
+            "- Prefer the 50-line solution over the 200-line solution.\n\n"
+            "Return ONLY the updated Python code. "
+            "Do not include explanation outside the code."
         )
 
         try:
             response = llm.chat(
                 [{"role": "user", "content": prompt}],
-                system="You are an expert ML experimentation assistant.",
+                system=(
+                    "You are an expert ML experimentation assistant. "
+                    "Think carefully before writing code. "
+                    "Make the minimum change needed to improve the metric. "
+                    "Surface your reasoning as a comment at the top of the changed section."
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("Code improvement call failed: %s", exc)

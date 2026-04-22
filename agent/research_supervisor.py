@@ -43,6 +43,7 @@ def _build_program_md(
     round_dir: str,
 ) -> str:
     """Generate program.md for the research worker to read."""
+    action = "Improve" if iteration > 0 else "Establish a baseline for"
     return f"""\
 # Hermes Research Experiment
 
@@ -53,32 +54,66 @@ def _build_program_md(
 {hypothesis}
 
 ## Objective
-Optimize **{metric_key}** ({metric_direction}).
+{action} **{metric_key}** ({metric_direction}).
 
 Time budget: {time_budget_sec} seconds.
 
-## Instructions
+## Step 0 — Think Before Running
 
-1. Read and run `main.py` in this directory: `{round_dir}`
-2. Collect the primary metric `{metric_key}`.
-3. Write results to `results.json` if possible (structured output).
-4. Print a metric line as your **final output**:
+Before executing anything, write a short block comment at the top of your
+output stating:
+
+1. **Assumption**: What do you assume the code in `main.py` does?
+2. **Bottleneck** (iteration > 0 only): Why do you think the metric is
+   at its current value? What is the binding constraint?
+3. **Change** (iteration > 0 only): What is the ONE change you will make
+   and why? If uncertain, pick the simpler option.
+4. **Success criterion**: What exact metric movement would confirm the
+   hypothesis? e.g. "{metric_key} moves from X to Y"
+
+If something is unclear, name what is confusing in your NOTES field.
+Do NOT guess silently.
+
+## Step 1 — Run the Experiment
+
+Run `main.py` in: `{round_dir}`
+
+Do not rewrite `main.py` unless iteration > 0 AND you have a specific,
+hypothesis-driven change to make. Make surgical edits only — touch only
+the lines required by your hypothesis.
+
+## Step 2 — Collect Results
+
+Write results to `results.json` in the working directory (structured output,
+preferred). Schema:
+
+```json
+{{"experiment_type": "...", "conditions": {{}}, "metadata": {{"total_runtime_sec": 0}}}}
+```
+
+## Step 3 — Report
+
+Print as your **final output**:
 
 ```
 METRIC: {metric_key}=<value> STATUS: improved|regressed|neutral NOTES: <one line>
 ```
 
+NOTES must say what you actually did (or what prevented success).
+Do NOT fabricate values. Do NOT omit the METRIC line.
+
 ## Time Guard
 
-Implement a time guard: check `time.monotonic()` periodically.
-Stop gracefully before 80% of the {time_budget_sec}s budget and save all results so far.
 Print `TIME_ESTIMATE: Xs` before your main loop.
+Check `time.monotonic()` periodically. Stop before 80% of {time_budget_sec}s
+and save partial results.
 
-## Anti-patterns
+## Rules
 
-- Do NOT invent or fabricate metric values.
-- Do NOT print other `key: value` lines unless they are real metrics.
-- Do NOT make network calls; keep the experiment self-contained.
+- Do NOT invent metric values.
+- Do NOT make network calls.
+- Do NOT refactor working code that is unrelated to your hypothesis.
+- If 5 lines solve it, write 5 lines — not 50.
 """
 
 

@@ -4,10 +4,11 @@
 #
 # Extracted from AutoResearchClaw prompts.default.yaml (MIT).
 # Only the blocks needed by the Karpathy inner loop are kept:
-#   - blocks.compute_budget       — time-guard logic for workers
-#   - blocks.topic_constraint     — hard topic constraint for code generation
+#   - blocks.compute_budget           — time-guard logic for workers
+#   - blocks.topic_constraint         — hard topic constraint for code generation
 #   - blocks.lattice_metric_reporting — Hermes-specific metric output format
-#   - stages.code_generation      — experiment code generation prompts
+#   - blocks.karpathy_guidelines      — Karpathy coding principles for LLM code gen
+#   - stages.code_generation          — experiment code generation prompts
 #
 # Template variables use {var_name} syntax.
 # =============================================================================
@@ -57,6 +58,33 @@ blocks:
 
     '
 
+  karpathy_guidelines: |
+    ## Karpathy Coding Guidelines
+
+    **1. Think Before Coding**
+    Before writing any code, state:
+    - Your assumptions (what does the current code do? why is the metric where it is?)
+    - Your ONE hypothesis for the change that will move the metric
+    - Your success criterion: "{metric_key} should move from X toward Y"
+    If multiple approaches exist, pick the simpler one. Surface confusion — don't guess silently.
+
+    **2. Simplicity First**
+    Minimum code that solves the problem. Nothing speculative.
+    - No features beyond what the metric improvement requires
+    - No abstractions for single-use code
+    - If you write 200 lines and it could be 50, write 50
+    Ask: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+
+    **3. Surgical Changes**
+    Touch only what your hypothesis requires. Every changed line must trace
+    directly to the metric improvement. Do not refactor working code.
+    If you notice unrelated issues, mention them in NOTES — don't fix them.
+
+    **4. Goal-Driven Execution**
+    The goal is measurable: the metric must move. State your plan:
+      1. [Change] → verify: metric moves from X toward Y
+    Strong success criteria let the loop self-correct. Weak criteria ("make it better") waste iterations.
+
   lattice_metric_reporting: |
     ## Hermes Metric Reporting (REQUIRED)
 
@@ -87,9 +115,14 @@ blocks:
 stages:
   code_generation:
     max_tokens: 8192
-    system: You are a computational scientist who writes real, runnable experiments. Your code implements actual algorithms
-      with real mathematical operations. You NEVER fake results with random number generators. Always use the ```filename:xxx.py
-      format for each file. Use numpy for numerical computation. Keep code self-contained and deterministic.
+    system: "You are a computational scientist who writes real, runnable experiments. Your code implements actual algorithms\
+      \ with real mathematical operations. You NEVER fake results with random number generators. Always use the ```filename:xxx.py\
+      \ format for each file. Use numpy for numerical computation. Keep code self-contained and deterministic.\n\n\
+      KARPATHY PRINCIPLES (mandatory):\n\
+      1. Think first: state your approach in a top-level comment before any code.\n\
+      2. Simplicity: minimum code that measures the metric. No speculative features. If 50 lines work, don't write 200.\n\
+      3. Surgical: every line of code must serve the metric. No abstractions for single use.\n\
+      4. Goal-driven: the code succeeds when the metric is measurable, not when it compiles."
     user: "Generate a Python experiment project for the following research topic:\nTOPIC: {topic}\n\nCRITICAL REQUIREMENTS\
       \ — your code MUST satisfy ALL of these:\n1. Implement REAL algorithms (e.g., gradient descent, Adam, SGD, etc.)\n \
       \  using numpy arrays — NOT random.uniform() loops that fake results.\n2. Define REAL objective/loss functions (e.g.,\
