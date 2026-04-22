@@ -3562,6 +3562,15 @@ def _build_call_kwargs(
     if temperature is not None:
         kwargs["temperature"] = temperature
 
+    # Kimi Coding k2.6 requires exactly 0.6 on the coding endpoint.
+    from hermes_cli.models import kimi_coding_required_temperature
+    kimi_required_temp = kimi_coding_required_temperature(
+        model,
+        base_url=base_url,
+    )
+    if kimi_required_temp is not None:
+        kwargs["temperature"] = kimi_required_temp
+
     if max_tokens is not None:
         # Codex adapter handles max_tokens internally; OpenRouter/Nous use max_tokens.
         # Direct OpenAI api.openai.com with newer models needs max_completion_tokens.

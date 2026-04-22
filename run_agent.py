@@ -8835,19 +8835,186 @@ class AIAgent:
                 )
             )
             is_xai_responses = self.provider == "xai" or self._base_url_hostname == "api.x.ai"
-            _msgs_for_codex = self._prepare_messages_for_non_vision_model(api_messages)
-            return _ct.build_kwargs(
-                model=self.model,
-                messages=_msgs_for_codex,
-                tools=self.tools,
-                reasoning_config=self.reasoning_config,
-                session_id=getattr(self, "session_id", None),
-                max_tokens=self.max_tokens,
-                request_overrides=self.request_overrides,
-                is_github_responses=is_github_responses,
-                is_codex_backend=is_codex_backend,
-                is_xai_responses=is_xai_responses,
-                github_reasoning_extra=self._github_models_reasoning_extra_body() if is_github_responses else None,
+
+            if reasoning_enabled and is_xai_responses:
+                # xAI reasons automatically — no effort param, just include encrypted content
+                kwargs["include"] = ["reasoning.encrypted_content"]
+            elif reasoning_enabled:
+                if is_github_responses:
+                    # Copilot's Responses route advertises reasoning-effort support,
+                    # but not OpenAI-specific prompt cache or encrypted reasoning
+                    # fields. Keep the payload to the documented subset.
+                    github_reasoning = self._github_models_reasoning_extra_body()
+                    if github_reasoning is not None:
+                        kwargs["reasoning"] = github_reasoning
+                else:
+                    kwargs["reasoning"] = {"effort": reasoning_effort, "summary": "auto"}
+                    kwargs["include"] = ["reasoning.encrypted_content"]
+            elif not is_github_responses and not is_xai_responses:
+                kwargs["include"] = []
+
+            if self.request_overrides:
+                kwargs.update(self.request_overrides)
+
+            if self.max_tokens is not None and not is_codex_backend:
+                kwargs["max_output_tokens"] = self.max_tokens
+
+            if is_xai_responses and getattr(self, "session_id", None):
+                kwargs["extra_headers"] = {"x-grok-conv-id": self.session_id}
+
+            return kwargs
+
+        sanitized_messages = api_messages
+        needs_sanitization = False
+        for msg in api_messages:
+            if not isinstance(msg, dict):
+                continue
+            if "codex_reasoning_items" in msg:
+                needs_sanitization = True
+                break
+
+            tool_calls = msg.get("tool_calls")
+            if isinstance(tool_calls, list):
+                for tool_call in tool_calls:
+                    if not isinstance(tool_call, dict):
+                        continue
+                    if "call_id" in tool_call or "response_item_id" in tool_call:
+                        needs_sanitization = True
+                        break
+                if needs_sanitization:
+                    break
+
+        if needs_sanitization:
+            sanitized_messages = copy.deepcopy(api_messages)
+            for msg in sanitized_messages:
+                if not isinstance(msg, dict):
+                    continue
+
+                # Codex-only replay state must not leak into strict chat-completions APIs.
+                msg.pop("codex_reasoning_items", None)
+
+                tool_calls = msg.get("tool_calls")
+                if isinstance(tool_calls, list):
+                    for tool_call in tool_calls:
+                        if isinstance(tool_call, dict):
+                            tool_call.pop("call_id", None)
+                            tool_call.pop("response_item_id", None)
+
+        # Qwen portal: normalize content to list-of-dicts, inject cache_control.
+        # Must run AFTER codex sanitization so we transform the final messages.
+        # If sanitization already deepcopied, reuse that copy (in-place).
+        if self._is_qwen_portal():
+            if sanitized_messages is api_messages:
+                # No sanitization was done — we need our own copy.
+                sanitized_messages = self._qwen_prepare_chat_messages(sanitized_messages)
+            else:
+                # Already a deepcopy — transform in place to avoid a second deepcopy.
+                self._qwen_prepare_chat_messages_inplace(sanitized_messages)
+
+        # GPT-5 and Codex models respond better to 'developer' than 'system'
+        # for instruction-following.  Swap the role at the API boundary so
+        # internal message representation stays uniform ("system").
+        _model_lower = (self.model or "").lower()
+        if (
+            sanitized_messages
+            and sanitized_messages[0].get("role") == "system"
+            and any(p in _model_lower for p in DEVELOPER_ROLE_MODELS)
+        ):
+            # Shallow-copy the list + first message only — rest stays shared.
+            sanitized_messages = list(sanitized_messages)
+            sanitized_messages[0] = {**sanitized_messages[0], "role": "developer"}
+
+        provider_preferences = {}
+        if self.providers_allowed:
+            provider_preferences["only"] = self.providers_allowed
+        if self.providers_ignored:
+            provider_preferences["ignore"] = self.providers_ignored
+        if self.providers_order:
+            provider_preferences["order"] = self.providers_order
+        if self.provider_sort:
+            provider_preferences["sort"] = self.provider_sort
+        if self.provider_require_parameters:
+            provider_preferences["require_parameters"] = True
+        if self.provider_data_collection:
+            provider_preferences["data_collection"] = self.provider_data_collection
+
+        api_kwargs = {
+            "model": self.model,
+            "messages": sanitized_messages,
+            "timeout": self._resolved_api_call_timeout(),
+        }
+        try:
+            from agent.auxiliary_client import _fixed_temperature_for_model, OMIT_TEMPERATURE
+        except Exception:
+            _fixed_temperature_for_model = None
+            OMIT_TEMPERATURE = None
+        if _fixed_temperature_for_model is not None:
+            fixed_temperature = _fixed_temperature_for_model(self.model, self.base_url)
+            if fixed_temperature is OMIT_TEMPERATURE:
+                api_kwargs.pop("temperature", None)
+            elif fixed_temperature is not None:
+                api_kwargs["temperature"] = fixed_temperature
+
+        # Kimi Coding k2.6 requires exactly 0.6 on the coding endpoint.
+        from hermes_cli.models import kimi_coding_required_temperature
+        kimi_required_temp = kimi_coding_required_temperature(
+            self.model,
+            base_url=self.base_url,
+        )
+        if kimi_required_temp is not None:
+            api_kwargs["temperature"] = kimi_required_temp
+
+        if self._is_qwen_portal():
+            api_kwargs["metadata"] = {
+                "sessionId": self.session_id or "hermes",
+                "promptId": str(uuid.uuid4()),
+            }
+        if self.tools:
+            api_kwargs["tools"] = self.tools
+
+        # ── max_tokens for chat_completions ──────────────────────────────
+        # Priority: ephemeral override (error recovery / length-continuation
+        # boost) > user-configured max_tokens > provider-specific defaults.
+        _ephemeral_out = getattr(self, "_ephemeral_max_output_tokens", None)
+        if _ephemeral_out is not None:
+            self._ephemeral_max_output_tokens = None  # consume immediately
+            api_kwargs.update(self._max_tokens_param(_ephemeral_out))
+        elif self.max_tokens is not None:
+            api_kwargs.update(self._max_tokens_param(self.max_tokens))
+        elif "integrate.api.nvidia.com" in self._base_url_lower:
+            # NVIDIA NIM defaults to a very low max_tokens when omitted,
+            # causing models like GLM-4.7 to truncate immediately (thinking
+            # tokens alone exhaust the budget).  16384 provides adequate room.
+            api_kwargs.update(self._max_tokens_param(16384))
+        elif self._is_qwen_portal():
+            # Qwen Portal defaults to a very low max_tokens when omitted.
+            # Reasoning models (qwen3-coder-plus) exhaust that budget on
+            # thinking tokens alone, causing the portal to return
+            # finish_reason="stop" with truncated output — the agent sees
+            # this as an intentional stop and exits the loop.  Send 65536
+            # (the documented max output for qwen3-coder models) so the
+            # model has adequate output budget for tool calls.
+            api_kwargs.update(self._max_tokens_param(65536))
+        elif (
+            base_url_host_matches(self.base_url, "api.kimi.com")
+            or base_url_host_matches(self.base_url, "moonshot.ai")
+            or base_url_host_matches(self.base_url, "moonshot.cn")
+        ):
+            # Kimi/Moonshot defaults to a low max_tokens when omitted.
+            # Reasoning tokens share the output budget — without an explicit
+            # value the model can exhaust it on thinking alone, causing
+            # "Response truncated due to output length limit".  32000 matches
+            # Kimi CLI's default (see MoonshotAI/kimi-cli kimi.py generate()).
+            api_kwargs.update(self._max_tokens_param(32000))
+            # Kimi requires reasoning_effort as a top-level chat completions
+            # parameter (not inside extra_body).  Mirror Kimi CLI's
+            # with_generation_kwargs(reasoning_effort=...) / with_thinking():
+            # when thinking is disabled, Kimi CLI omits reasoning_effort
+            # entirely (maps to None).
+            _kimi_thinking_off = bool(
+                self.reasoning_config
+                and isinstance(self.reasoning_config, dict)
+                and self.reasoning_config.get("enabled") is False
             )
 
         # ── chat_completions (default) ─────────────────────────────────────
