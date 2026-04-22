@@ -23,6 +23,9 @@ from agent.prompt_builder import _scan_context_content
 
 logger = logging.getLogger(__name__)
 
+# Module-level cache for subdirectory hints to avoid repeated disk reads
+_hint_cache: dict[tuple[str, str], Optional[str]] = {}
+
 # Context files to look for in subdirectories, in priority order.
 # Same filenames as prompt_builder.py but we load ALL found (not first-wins)
 # since different subdirectories may use different conventions.
@@ -170,6 +173,13 @@ class SubdirectoryHintTracker:
 
     def _load_hints_for_directory(self, directory: Path) -> Optional[str]:
         """Load hint files from a directory. Returns formatted text or None."""
+        cache_key = (str(directory), str(self.working_dir))
+        if cache_key in _hint_cache:
+            cached = _hint_cache[cache_key]
+            if cached is not None:
+                self._loaded_dirs.add(directory)
+            return cached
+
         self._loaded_dirs.add(directory)
 
         found_hints = []
@@ -208,6 +218,7 @@ class SubdirectoryHintTracker:
                 logger.debug("Could not read %s: %s", hint_path, exc)
 
         if not found_hints:
+            _hint_cache[cache_key] = None
             return None
 
         sections = []
@@ -216,9 +227,11 @@ class SubdirectoryHintTracker:
                 f"[Subdirectory context discovered: {rel_path}]\n{content}"
             )
 
+        result = "\n\n".join(sections)
+        _hint_cache[cache_key] = result
         logger.debug(
             "Loaded subdirectory hints from %s: %s",
             directory,
             [h[0] for h in found_hints],
         )
-        return "\n\n".join(sections)
+        return result

@@ -490,6 +490,26 @@ class ResearchSupervisor:
             lattice_comment_fn(f"Baseline only. best={runner.history.baseline_metric}")
             return runner.history
 
+        # Determine early-stop parameters based on baseline quality
+        baseline_metric = runner.history.baseline_metric
+        is_high_baseline = False
+        min_delta = 0.0
+        if baseline_metric is not None:
+            if spec.metric_direction == "maximize" and baseline_metric >= 0.9:
+                is_high_baseline = True
+                min_delta = 0.05
+            elif spec.metric_direction == "minimize" and baseline_metric <= 0.1:
+                is_high_baseline = True
+                min_delta = 0.05
+
+        early_stop_limit = 1 if is_high_baseline else 3
+        if is_high_baseline:
+            logger.info(
+                "High baseline detected (%s=%.4f). Using aggressive early stop: "
+                "limit=%d, min_delta=%.2f",
+                spec.metric_key, baseline_metric, early_stop_limit, min_delta,
+            )
+
         # Autogenesis AOOR improvement loop
         no_improvement = 0
         for iteration in range(1, max_iterations + 1):
@@ -510,15 +530,31 @@ class ResearchSupervisor:
 
             # SEPL: evaluate → keep/discard (handled by ExperimentRunner)
             # SEPL: rollback — restore best on-disk artifact, not the seed string
-            if result.improved:
+            # For high baselines, require min_delta for improvement to count
+            improved = result.improved
+            if improved and is_high_baseline and baseline_metric is not None:
+                current_metric = result.primary_metric
+                if current_metric is not None:
+                    delta = abs(current_metric - baseline_metric)
+                    if delta < min_delta:
+                        improved = False
+                        logger.info(
+                            "Improvement below min_delta (%.4f < %.2f), treating as non-improving",
+                            delta, min_delta,
+                        )
+
+            if improved:
                 no_improvement = 0
                 best_artifact_holder[0] = actual_artifact
             else:
                 no_improvement += 1
                 attempt_holder[0] = best_artifact_holder[0]  # rollback to best artifact
 
-            if no_improvement >= 3:
-                logger.info("Early stop: 3 non-improving iterations for %s", run_id)
+            if no_improvement >= early_stop_limit:
+                logger.info(
+                    "Early stop: %d non-improving iterations for %s (limit=%d)",
+                    no_improvement, run_id, early_stop_limit,
+                )
                 # SEPL: reflection optimizer — synthesize before giving up
                 self._reflect(runner.history, spec, llm, lattice_comment_fn, run_dir)
                 break
@@ -598,7 +634,14 @@ class ResearchSupervisor:
         metrics: dict[str, object] = dict(parsed.to_flat_metrics())
 
         # LLM judge override: score the deliverable externally
-        if spec.evaluation_mode == "llm_judge" and llm is not None and summary:
+        # Optimization: only run judge on baseline (iter 0) and every 2nd iteration
+        # to reduce API calls and latency.
+        if (
+            spec.evaluation_mode == "llm_judge"
+            and llm is not None
+            and summary
+            and (iteration == 0 or iteration % 2 == 0)
+        ):
             judge_score = self._score_with_llm_judge(summary, spec, llm)
             if judge_score is not None:
                 metrics[spec.metric_key] = judge_score

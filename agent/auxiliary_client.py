@@ -161,6 +161,10 @@ _PROVIDER_ALIASES = {
     "tencentmaas": "tencent-tokenhub",
 }
 
+# Cache for resolve_provider_client to avoid repeated auth resolution
+_resolve_provider_cache: dict[tuple, tuple] = {}
+_resolve_provider_cache_lock = threading.Lock()
+
 
 def _normalize_aux_provider(provider: Optional[str]) -> str:
     normalized = (provider or "auto").strip().lower()
@@ -2180,6 +2184,66 @@ def resolve_provider_client(
     api_mode: str = None,
     main_runtime: Optional[Dict[str, Any]] = None,
     is_vision: bool = False,
+) -> Tuple[Optional[Any], Optional[str]]:
+    """Central router: given a provider name and optional model, return a
+    configured client with the correct auth, base URL, and API format.
+
+    The returned client always exposes ``.chat.completions.create()`` — for
+    Codex/Responses API providers, an adapter handles the translation
+    transparently.
+
+    Args:
+        provider: Provider identifier.  One of:
+            "openrouter", "nous", "openai-codex" (or "codex"),
+            "zai", "kimi-coding", "minimax", "minimax-cn",
+            "custom" (OPENAI_BASE_URL + OPENAI_API_KEY),
+            "auto" (full auto-detection chain).
+        model: Model slug override.  If None, uses the provider's default
+               auxiliary model.
+        async_mode: If True, return an async-compatible client.
+        raw_codex: If True, return a raw OpenAI client for Codex providers
+            instead of wrapping in CodexAuxiliaryClient.  Use this when
+            the caller needs direct access to responses.stream() (e.g.,
+            the main agent loop).
+        explicit_base_url: Optional direct OpenAI-compatible endpoint.
+        explicit_api_key: Optional API key paired with explicit_base_url.
+        api_mode: API mode override.  One of "chat_completions",
+            "codex_responses", or None (auto-detect).  When set to
+            "codex_responses", the client is wrapped in
+            CodexAuxiliaryClient to route through the Responses API.
+
+    Returns:
+        (client, resolved_model) or (None, None) if auth is unavailable.
+    """
+    cache_key = (
+        provider, model, async_mode, raw_codex,
+        explicit_base_url, explicit_api_key, api_mode,
+        tuple(sorted((main_runtime or {}).items())) if main_runtime else None,
+    )
+    with _resolve_provider_cache_lock:
+        if cache_key in _resolve_provider_cache:
+            client, resolved_model = _resolve_provider_cache[cache_key]
+            logger.debug("resolve_provider_client: cache hit for %s", provider)
+            return client, resolved_model
+
+    result = _resolve_provider_client_impl(
+        provider, model, async_mode, raw_codex,
+        explicit_base_url, explicit_api_key, api_mode, main_runtime,
+    )
+    with _resolve_provider_cache_lock:
+        _resolve_provider_cache[cache_key] = result
+    return result
+
+
+def _resolve_provider_client_impl(
+    provider: str,
+    model: str = None,
+    async_mode: bool = False,
+    raw_codex: bool = False,
+    explicit_base_url: str = None,
+    explicit_api_key: str = None,
+    api_mode: str = None,
+    main_runtime: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[Any], Optional[str]]:
     """Central router: given a provider name and optional model, return a
     configured client with the correct auth, base URL, and API format.
