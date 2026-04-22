@@ -839,3 +839,23 @@ class TestProbeApiModelsUserAgent:
         assert ua and ua.startswith("hermes-cli/")
         # No Authorization was set, but UA must still be present.
         assert req.get_header("Authorization") is None
+
+
+class TestKimiCodingRequiredTemperature:
+    """kimi_coding_required_temperature pins 0.6 for kimi-k2.6 on the coding endpoint."""
+
+    def test_kimi_k2_6_on_coding_endpoint(self):
+        from hermes_cli.models import kimi_coding_required_temperature
+        assert kimi_coding_required_temperature("kimi-k2.6", base_url="https://api.kimi.com/coding/v1") == 0.6
+
+    def test_kimi_k2_6_on_public_endpoint(self):
+        from hermes_cli.models import kimi_coding_required_temperature
+        assert kimi_coding_required_temperature("kimi-k2.6", base_url="https://api.moonshot.ai/v1") is None
+
+    def test_other_model_on_coding_endpoint(self):
+        from hermes_cli.models import kimi_coding_required_temperature
+        assert kimi_coding_required_temperature("kimi-k2.5", base_url="https://api.kimi.com/coding/v1") is None
+
+    def test_no_base_url(self):
+        from hermes_cli.models import kimi_coding_required_temperature
+        assert kimi_coding_required_temperature("kimi-k2.6") is None

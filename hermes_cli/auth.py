@@ -506,6 +506,149 @@ def _resolve_kimi_base_url(api_key: str, default_url: str, env_override: str) ->
     return default_url
 
 
+# =============================================================================
+# Kimi CLI OAuth (read credentials installed by `kimi login`)
+# =============================================================================
+
+def _kimi_cli_credentials_path():
+    return Path.home() / ".kimi" / "credentials" / "kimi-code.json"
+
+
+def _kimi_cli_device_id_path() -> Path:
+    return Path.home() / ".kimi" / "device_id"
+
+
+def _kimi_cli_version() -> str:
+    """Return installed kimi-cli version, or a sensible default."""
+    try:
+        import shutil
+        kimi_bin = shutil.which("kimi")
+        if kimi_bin:
+            import subprocess
+            result = subprocess.run(
+                [kimi_bin, "--version"],
+                capture_output=True, text=True, timeout=5,
+            )
+            for part in result.stdout.strip().split():
+                part = part.strip().rstrip(",")
+                if part and part[0].isdigit():
+                    return part
+    except Exception:
+        pass
+    return "1.12.0"
+
+
+def _read_kimi_cli_credentials() -> Dict[str, Any]:
+    """Read OAuth credentials from the installed Kimi CLI."""
+    cred_path = _kimi_cli_credentials_path()
+    if not cred_path.exists():
+        raise AuthError(
+            "Kimi CLI credentials not found. Run 'kimi login' first.",
+            provider="kimi-coding",
+            code="kimi_auth_missing",
+        )
+    try:
+        data = json.loads(cred_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise AuthError(
+            f"Failed to read Kimi CLI credentials from {cred_path}: {exc}",
+            provider="kimi-coding",
+            code="kimi_auth_read_failed",
+        ) from exc
+    if not isinstance(data, dict):
+        raise AuthError(
+            f"Invalid Kimi CLI credentials in {cred_path}.",
+            provider="kimi-coding",
+            code="kimi_auth_invalid",
+        )
+    return data
+
+
+def _kimi_oauth_token_is_expired(expires_at: Any, skew_seconds: int = 300) -> bool:
+    try:
+        exp = float(expires_at)
+    except Exception:
+        return True
+    return exp <= (time.time() + max(0, skew_seconds))
+
+
+def kimi_coding_default_headers() -> Dict[str, str]:
+    """Return the X-Msh-* headers that Kimi's coding API now requires."""
+    import platform
+    import socket
+
+    device_id = ""
+    device_path = _kimi_cli_device_id_path()
+    if device_path.exists():
+        try:
+            device_id = device_path.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+
+    version = _kimi_cli_version()
+
+    headers: Dict[str, str] = {
+        "User-Agent": f"KimiCLI/{version}",
+        "X-Msh-Platform": "kimi_cli",
+        "X-Msh-Version": version,
+        "X-Msh-Device-Name": platform.node() or socket.gethostname(),
+        "X-Msh-Device-Model": platform.machine(),
+        "X-Msh-Os-Version": platform.version(),
+    }
+    if device_id:
+        headers["X-Msh-Device-Id"] = device_id
+    return headers
+
+
+def resolve_kimi_coding_runtime_credentials(
+    *,
+    prefer_cli_oauth: bool = True,
+) -> Dict[str, Any]:
+    """Resolve credentials for kimi-coding, preferring Kimi CLI OAuth."""
+    base_url = os.getenv("KIMI_BASE_URL", "").strip().rstrip("/")
+    if not base_url:
+        base_url = KIMI_CODE_BASE_URL
+
+    if prefer_cli_oauth:
+        try:
+            creds = _read_kimi_cli_credentials()
+            access_token = str(creds.get("access_token", "") or "").strip()
+            if access_token and not _kimi_oauth_token_is_expired(creds.get("expires_at")):
+                return {
+                    "provider": "kimi-coding",
+                    "api_key": access_token,
+                    "base_url": base_url,
+                    "source": "kimi-cli-oauth",
+                    "auth_file": str(_kimi_cli_credentials_path()),
+                }
+            logger.debug(
+                "Kimi CLI OAuth token expired (expires_at=%s). "
+                "Run 'kimi login' to refresh.",
+                creds.get("expires_at"),
+            )
+        except AuthError:
+            logger.debug("Kimi CLI OAuth not available, falling back to API key.")
+        except Exception as exc:
+            logger.debug("Kimi CLI OAuth read failed: %s", exc)
+
+    api_key = os.getenv("KIMI_API_KEY", "").strip()
+    if api_key:
+        if not base_url:
+            base_url = _resolve_kimi_base_url(api_key, KIMI_CODE_BASE_URL, "")
+        return {
+            "provider": "kimi-coding",
+            "api_key": api_key,
+            "base_url": base_url,
+            "source": "env",
+        }
+
+    raise AuthError(
+        "No Kimi credentials found. Either run 'kimi login' (OAuth) or "
+        "set the KIMI_API_KEY environment variable.",
+        provider="kimi-coding",
+        code="kimi_no_credentials",
+    )
+
 
 _PLACEHOLDER_SECRET_VALUES = {
     "*",
@@ -4081,6 +4224,20 @@ def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
 
     if provider_id in ("kimi-coding", "kimi-coding-cn"):
         base_url = _resolve_kimi_base_url(api_key, pconfig.inference_base_url, env_url)
+        # Kimi's coding API now requires OAuth from an approved coding agent.
+        # Try the Kimi CLI's OAuth token first (avoids the 403
+        # "only available for Coding Agents" error).
+        if "api.kimi.com" in base_url:
+            try:
+                oauth_creds = resolve_kimi_coding_runtime_credentials()
+                return {
+                    "provider": provider_id,
+                    "api_key": oauth_creds["api_key"],
+                    "base_url": base_url.rstrip("/"),
+                    "source": oauth_creds.get("source", "kimi-cli-oauth"),
+                }
+            except AuthError:
+                logger.debug("Kimi CLI OAuth unavailable, using API key fallback.")
     elif provider_id == "zai":
         base_url = _resolve_zai_base_url(api_key, pconfig.inference_base_url, env_url)
     elif env_url:
