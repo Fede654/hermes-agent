@@ -163,7 +163,7 @@ def run_research(
     evaluation_prompt: str = "",
     initial_attempt: str = "",
     max_iterations: int = 3,
-    time_budget_sec: int = 300,
+    time_budget_sec: int = 0,
     lattice_task_id: Optional[str] = None,
     parent_agent: Any = None,
 ) -> str:
@@ -255,7 +255,7 @@ registry.register(
         evaluation_prompt=args.get("evaluation_prompt", ""),
         initial_attempt=args.get("initial_attempt", ""),
         max_iterations=args.get("max_iterations", 3),
-        time_budget_sec=args.get("time_budget_sec", 300),
+        time_budget_sec=args.get("time_budget_sec", 0),
         lattice_task_id=args.get("lattice_task_id"),
         parent_agent=kw.get("parent_agent"),
     ),

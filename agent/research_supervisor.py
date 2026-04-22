@@ -181,8 +181,8 @@ The current attempt is in `attempt.py` in: `{round_dir}`
 
 {"Do not rewrite unless you have a specific, hypothesis-driven change. Make surgical edits only — every changed line must trace to your hypothesis." if iteration > 0 else "Implement the deliverable in `attempt.py`. Run it to verify."}
 
-Time budget: {time_budget_sec}s. Print `TIME_ESTIMATE: Xs` before your main loop.
-Stop before 80% of budget and save partial results.
+{f"Time budget: {time_budget_sec}s. Print `TIME_ESTIMATE: Xs` before your main loop." if time_budget_sec > 0 else "Time budget: unlimited. Work until converged."}
+{"Stop before 80% of budget and save partial results." if time_budget_sec > 0 else ""}
 
 ## Step 2 — Measure
 
@@ -213,7 +213,7 @@ def _brief_search(spec: TaskSpec, *, iteration: int, round_dir: str, time_budget
 
 {"The previous search strategy is in `attempt.md` in: " + round_dir + ". Revise it based on your hypothesis." if iteration > 0 else "Design and execute a search strategy. Save results to `attempt.md`."}
 
-Time budget: {time_budget_sec}s. Do not make redundant searches — each query must have a hypothesis.
+{f"Time budget: {time_budget_sec}s. Do not make redundant searches — each query must have a hypothesis." if time_budget_sec > 0 else "Time budget: unlimited. Work until converged."}
 
 ## Step 2 — Evaluate Results
 
@@ -245,7 +245,7 @@ def _brief_research(spec: TaskSpec, *, iteration: int, round_dir: str, time_budg
 
 {"The current draft is in `attempt.md` in: " + round_dir + ". Identify its weakest section and address it." if iteration > 0 else "Research the topic. Produce an initial synthesis in `attempt.md`."}
 
-Time budget: {time_budget_sec}s. Focus — do not survey everything; go deep on what your hypothesis identifies as the gap.
+{f"Time budget: {time_budget_sec}s. Focus — do not survey everything; go deep on what your hypothesis identifies as the gap." if time_budget_sec > 0 else "Time budget: unlimited. Work until converged."}
 
 ## Step 2 — Self-Evaluate
 
@@ -277,7 +277,7 @@ def _brief_generic(spec: TaskSpec, *, iteration: int, round_dir: str, time_budge
 
 {"The previous attempt is in `attempt.md` in: " + round_dir + ". Revise it based on your hypothesis." if iteration > 0 else "Produce the deliverable. Save it to `attempt.md`."}
 
-Time budget: {time_budget_sec}s.
+{f"Time budget: {time_budget_sec}s." if time_budget_sec > 0 else "Time budget: unlimited. Work until converged."}
 
 ## Step 2 — Measure
 
@@ -388,7 +388,7 @@ class ResearchSupervisor:
         *,
         run_id: str,
         max_iterations: int = 5,
-        time_budget_sec: int = 300,
+        time_budget_sec: int = 0,
         keep_threshold: float = 0.0,
         llm: Any = None,
         worker_toolsets: list[str] | None = None,

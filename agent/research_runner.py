@@ -25,7 +25,7 @@ class HermesExperimentConfig:
     """Minimal experiment config — replaces researchclaw ExperimentConfig."""
     metric_key: str = "primary_metric"
     metric_direction: str = "maximize"   # "maximize" or "minimize"
-    time_budget_sec: int = 300
+    time_budget_sec: int = 0
     max_iterations: int = 5
     keep_threshold: float = 0.0          # min abs delta to consider "kept"
 
