@@ -634,14 +634,7 @@ class ResearchSupervisor:
         metrics: dict[str, object] = dict(parsed.to_flat_metrics())
 
         # LLM judge override: score the deliverable externally
-        # Optimization: only run judge on baseline (iter 0) and every 2nd iteration
-        # to reduce API calls and latency.
-        if (
-            spec.evaluation_mode == "llm_judge"
-            and llm is not None
-            and summary
-            and (iteration == 0 or iteration % 2 == 0)
-        ):
+        if spec.evaluation_mode == "llm_judge" and llm is not None and summary:
             judge_score = self._score_with_llm_judge(summary, spec, llm)
             if judge_score is not None:
                 metrics[spec.metric_key] = judge_score
