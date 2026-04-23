@@ -255,6 +255,16 @@ TOOLSETS = {
         "includes": []
     },
 
+    "altercraft": {
+        "description": "Embodied Minecraft interaction (AlterCraft) — talk, look, move, inventory. Gated on the altercraft bot HTTP server being reachable at $MC_API_URL.",
+        "tools": [
+            "altercraft_status", "altercraft_look", "altercraft_inventory",
+            "altercraft_say", "altercraft_whisper", "altercraft_listen",
+            "altercraft_goto", "altercraft_stop",
+        ],
+        "includes": []
+    },
+
     "feishu_doc": {
         "description": "Read Feishu/Lark document content",
         "tools": ["feishu_doc_read"],
