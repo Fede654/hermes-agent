@@ -2,89 +2,184 @@
 
 ## What This Is
 
-Hermes AutoResearch is the **Karpathy inner loop** for autonomous ML experimentation inside Hermes. Given a research topic, it runs a baseline experiment, proposes code improvements via LLM, executes them through `delegate_task`, keeps improvements and discards regressions, and records lessons via `EvolutionStore`.
+Hermes AutoResearch is the **Karpathy inner loop** for autonomous experimentation inside Hermes. Given a research topic, it runs a baseline experiment, proposes improvements via LLM, executes them through `delegate_task`, keeps improvements and discards regressions, and records structured learnings.
 
-It is **not** a 23-stage pipeline. It is a tight 5-step loop that runs entirely through Hermes infrastructure — no external CLI, no pip install, no git branches.
+The architecture is **desacoplada**: long-running research loops execute as independent OS processes with durable checkpoints, so the parent agent does not burn iteration budget or die to timeouts.
 
 ## Quick Start
 
+### Running a Research Job (Detached)
+
+```bash
+# Create a job spec JSON
+python -c '
+import json
+spec = {
+    "job_id": "my-research",
+    "job_dir": "/home/user/.hermes/research-jobs/my-research",
+    "model": "kimi-for-coding",
+    "provider": "kimi-coding",
+    "topic": "Analyze WebAssembly adoption in 2025",
+    "deliverable": "Ranked list of relevant papers with abstracts",
+    "metric_key": "completeness_score",
+    "metric_direction": "maximize",
+    "task_type": "research",
+    "max_iterations": 3,
+}
+json.dump(spec, open("/home/user/.hermes/research-jobs/my-research/job.json", "w"))
+'
+
+# Launch detached runner
+source venv/bin/activate
+HERMES_YOLO_MODE=1 python -m agent.research_job_runner \
+    /home/user/.hermes/research-jobs/my-research/job.json
+```
+
+### From Python (Synchronous)
+
 ```python
-from agent.research_runner import ExperimentRunner, HermesExperimentConfig
+from agent.research_supervisor import ResearchSupervisor, TaskSpec
 from pathlib import Path
 
-config = HermesExperimentConfig(
-    metric_key="accuracy",
+spec = TaskSpec(
+    topic="Analyze WebAssembly adoption in 2025",
+    deliverable="Ranked list of relevant papers with abstracts",
+    metric_key="completeness_score",
     metric_direction="maximize",
-    time_budget_sec=300,
-    max_iterations=5,
+    task_type="research",
 )
 
-runner = ExperimentRunner(
-    config=config,
-    workspace=Path("artifacts/hermes-research-001"),
-    delegate_fn=your_delegate_fn,       # wraps delegate_task
-    lattice_comment_fn=your_comment_fn, # wraps lattice_comment
+supervisor = ResearchSupervisor(parent_agent=agent, workspace=Path("research-workspace"))
+history = supervisor.run(
+    spec,
+    initial_attempt="",
+    run_id="run-001",
+    max_iterations=3,
+    llm=agent.llm_client,
 )
-
-history = runner.run_loop(initial_code, run_id="run-001", llm=your_llm_client)
 ```
 
-## The 5-Step Karpathy Loop
+## Architecture
 
 ```
-Step 1: HYPOTHESIZE     — Write program.md with experiment plan and metric target
-Step 2: PROGRAM         — Generate initial experiment code (or load from disk)
-Step 3: DELEGATE        — Spawn worker via delegate_task; worker reads program.md and runs code
-Step 4: METRIC          — Parse worker output via UniversalMetricParser (JSON → CSV → stdout)
-Step 5: KEEP/DISCARD    — If metric improved: keep (update best), else discard; iterate
+Parent Agent / CLI
+       │
+       ▼
+┌─────────────────────────┐
+│  research_job_runner    │  ← Detached OS process
+│  (entrypoint)           │
+└─────────────────────────┘
+       │
+       ▼
+┌─────────────────────────┐
+│   ResearchSupervisor    │  ← Karpathy loop orchestrator
+│   • TaskSpec            │
+│   • run()               │
+│   • _observe()          │
+│   • _checkpoint()       │
+└─────────────────────────┘
+       │
+       ▼
+┌─────────────────────────┐     ┌─────────────────────────┐
+│    delegate_task        │────▶│      Worker Subagent    │
+│    (per iteration)      │     │  • Reads task_brief.md  │
+└─────────────────────────┘     │  • Writes attempt.md    │
+                                │  • Writes results.json  │
+                                │  • Reports metric       │
+                                └─────────────────────────┘
 ```
 
-## Project Structure (Hermes ports)
+## Project Structure
 
 ```
 agent/
-├── research_runner.py   # ExperimentRunner — the Karpathy loop
-├── research_evolution.py# EvolutionStore — JSONL lessons, time-decay weighting
-└── research_metrics.py  # UniversalMetricParser — JSON/CSV/stdout metric extraction
+├── research_job_runner.py    # Detached entrypoint: builds AIAgent, calls run_research
+├── research_supervisor.py    # ResearchSupervisor + TaskSpec + task briefs
+├── research_runner.py        # ExperimentRunner + ExperimentHistory
+├── research_metrics.py       # UniversalMetricParser
+└── subdirectory_hints.py     # Progressive context discovery (cached)
 
-skills/autoresearch/
-├── a-evolve/            # A-Evolve methodology skill
-├── hypothesis-formulation/
-├── literature-search/
-├── scientific-visualization/
-├── scientific-writing/
-├── statistical-reporting/
-└── domain/              # Domain-specific experiment skills (ML, chemistry, biology)
+tools/
+├── research_tool.py          # run_research() public API
+└── research_job_tool.py      # start_research_job, research_job_status, collect_research_job
 
-prompts/
-└── autoresearch.yaml    # Prompt blocks: compute_budget, topic_constraint, code_generation
-
-HERMES_RESEARCH.md       # This file — agent bootstrap
-RESEARCH_AGENTS.md       # Worker agent contract
+~/.hermes/research-jobs/      # Job specs + checkpoints + logs
+~/.hermes/research-workspace/ # Round artifacts (attempt.md, results.json, learnings.jsonl)
 ```
 
-## Loop State Machine
+## The Karpathy Loop
 
-Hermes uses Lattice task states instead of git branches:
+```
+Step 1: BASELINE      — Worker receives task brief + attempt file, produces deliverable
+Step 2: METRIC        — UniversalMetricParser reads results.json / stdout
+Step 3: JUDGE         — LLM judge scores deliverable (if evaluation_mode="llm_judge")
+Step 4: OBSERVE       — Structured learning appended to learnings.jsonl
+Step 5: CHECKPOINT    — history.json + checkpoint.json written to disk
+Step 6: OPTIMIZE      — LLM proposes revised attempt based on history
+Step 7: KEEP/DISCARD  — If metric improved: keep, else discard; iterate
+```
 
-| Loop State | Lattice Status | Meaning |
-|-----------|---------------|---------|
-| Worker running | `in_progress` | delegate_task active |
-| Round complete, metric improved | comment posted | supervisor reads metric |
-| Best result kept | (stays in_progress) | loop continues |
-| Early stop / done | `done` via `lattice complete` | experiment accepted |
-| Discarded round | comment posted | loop continues with next iteration |
+## Task Types
+
+| Type | Default Toolsets | Deliverable | Attempt File |
+|------|-----------------|-------------|--------------|
+| `code` | terminal, file | Python code | attempt.py |
+| `search` | web, terminal, file | Search results | attempt.md |
+| `research` | web, terminal, file | Synthesis | attempt.md |
+| `generic` | terminal, file | Any text | attempt.md |
+
+## Worker Contract
+
+The worker receives:
+- `task_brief.md` — Full instructions including think block, rules, tools available
+- `attempt.py` or `attempt.md` — Current attempt to refine
+- Environment variable `HERMES_YOLO_MODE=1` to skip command approval
+
+The worker must produce:
+- `results.json` with `{"<metric_key>": <value>}`
+- Final line: `METRIC: <key>=<value> STATUS: improved|regressed|neutral NOTES: <one line>`
+
+## Checkpoints and Recovery
+
+After every round, the supervisor writes:
+
+```
+~/.hermes/research-jobs/<job_id>/
+├── checkpoint.json   # {round, total_rounds, best_metric, updated_at}
+├── history.json      # Full results array + best reference
+├── runner.log        # Runner + supervisor logs
+└── state.json        # {status, pid, started_at}
+```
+
+External monitors can read `checkpoint.json` without polling the process.
 
 ## Decision Guide
 
 | Situation | Action |
 |-----------|--------|
-| Have a clear research topic | Write `program.md`, call `run_loop()` with `llm=` set |
-| Want baseline only (no LLM improvement) | Call `run_loop()` with `llm=None` |
-| Worker times out | `DelegateSandboxResult.timed_out=True`; runner records error, continues loop |
-| 3 consecutive non-improving iterations | Runner stops early, posts Lattice comment |
-| Want to persist lessons | Use `EvolutionStore.append_many()` after each round |
-| Want to inspect history | `ExperimentRunner.history.to_dict()` or `save_history(path)` |
+| Long-running research (>5 min) | Use `research_job_runner` detached |
+| Quick experiment (<2 min) | Call `run_research()` directly |
+| Need baseline only | Set `llm=None` in supervisor |
+| Worker times out | `DelegateSandboxResult.timed_out=True`; loop continues |
+| 3 consecutive non-improving | Runner stops early (or 1 if high baseline) |
+| Want to inspect history | Read `history.json` from checkpoint dir |
+
+## Performance Optimizations
+
+| Optimization | File | Impact |
+|-------------|------|--------|
+| **Lock file** | `research_job_runner.py` | Prevents duplicate restarts (~16 min saved) |
+| **Provider cache** | `auxiliary_client.py` | Caches `resolve_provider_client` (~14 calls → 1) |
+| **Subdirectory hints cache** | `subdirectory_hints.py` | Caches hint loads per directory |
+| **Aggressive early stop** | `research_supervisor.py` | Baseline ≥0.9 → stop after 1 non-improving iter |
+| **LLM judge every iter** | `research_supervisor.py` | Objective scoring on all loops |
+
+## Anti-Patterns
+
+- **DO NOT** run `research_job_runner` in foreground without `timeout >= 300`
+- **DO NOT** poll the process with `ps` / `tail` — read `checkpoint.json` instead
+- **DO NOT** launch the same job twice — the lock file prevents this
+- **DO NOT** delete `.runner.lock` manually — use `kill` on the process
 
 ## Metric Reporting (Worker Contract)
 
@@ -105,5 +200,3 @@ The `UniversalMetricParser` also reads `results.json` (structured) or `results.c
 
 Hermes AutoResearch skills are in `skills/autoresearch/` and are loaded automatically.
 Domain-specific skills (ML, chemistry, biology) are in `skills/autoresearch/domain/`.
-
-Evolution artifacts go in `skills/autoresearch/evolved/`.
