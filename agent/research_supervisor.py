@@ -405,7 +405,7 @@ class ResearchSupervisor:
         lattice_root: str = str(get_hermes_home() / "org"),
     ) -> None:
         self._parent_agent = parent_agent
-        self._workspace = workspace or (Path.home() / ".hermes" / "research-workspace")
+        self._workspace = workspace or (get_hermes_home() / "research-workspace")
         self._lattice_task_id = lattice_task_id
         self._lattice_root = lattice_root
 
