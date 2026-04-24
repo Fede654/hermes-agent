@@ -30,6 +30,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from hermes_constants import get_hermes_home
+
 from agent.research_runner import (
     DelegateSandboxResult,
     ExperimentHistory,
@@ -400,7 +402,7 @@ class ResearchSupervisor:
         parent_agent: Any,
         workspace: Path | None = None,
         lattice_task_id: Optional[str] = None,
-        lattice_root: str = "/home/fede/.hermes/org",
+        lattice_root: str = str(get_hermes_home() / "org"),
     ) -> None:
         self._parent_agent = parent_agent
         self._workspace = workspace or (Path.home() / ".hermes" / "research-workspace")

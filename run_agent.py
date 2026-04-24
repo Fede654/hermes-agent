@@ -10258,7 +10258,9 @@ class AIAgent:
                 env=get_active_env(effective_task_id),
             )
 
-            subdir_hints = self._subdirectory_hints.check_tool_call(name, args)
+            subdir_hints = None
+            if self._subdirectory_hints:
+                subdir_hints = self._subdirectory_hints.check_tool_call(name, args)
             if subdir_hints:
                 function_result += subdir_hints
 
@@ -10647,9 +10649,10 @@ class AIAgent:
             )
 
             # Discover subdirectory context files from tool arguments
-            subdir_hints = self._subdirectory_hints.check_tool_call(function_name, function_args)
-            if subdir_hints:
-                function_result += subdir_hints
+            if self._subdirectory_hints:
+                subdir_hints = self._subdirectory_hints.check_tool_call(function_name, function_args)
+                if subdir_hints:
+                    function_result += subdir_hints
 
             tool_msg = {
                 "role": "tool",

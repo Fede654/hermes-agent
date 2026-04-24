@@ -14,13 +14,13 @@ import shlex
 from pathlib import Path
 from typing import Any, Optional
 
+from hermes_constants import get_hermes_home
 from tools.registry import registry, tool_error
 
 logger = logging.getLogger(__name__)
 
 
 def _job_dir(job_id: str) -> Path:
-    from hermes_constants import get_hermes_home
     return get_hermes_home() / "research-jobs" / job_id
 
 
@@ -35,7 +35,7 @@ def _write_job_spec(job_id: str, spec: dict[str, Any]) -> Path:
 def _load_config_for_job() -> dict[str, Any]:
     """Read Hermes config to extract model/provider/base_url for the runner."""
     import yaml
-    config_path = Path.home() / ".hermes" / "config.yaml"
+    config_path = get_hermes_home() / "config.yaml"
     if not config_path.exists():
         return {}
     cfg = yaml.safe_load(config_path.read_text())
@@ -165,7 +165,7 @@ def _action_start(args: dict[str, Any]) -> str:
     spec_path = _write_job_spec(job_id, spec)
     job_dir = _job_dir(job_id)
 
-    hermes_root = Path("/home/fede/.hermes/hermes-agent")
+    hermes_root = get_hermes_home() / "hermes-agent"
     cmd = (
         f"cd {shlex.quote(str(hermes_root))} && "
         f"source venv/bin/activate && "
@@ -288,7 +288,7 @@ def _action_resume(args: dict[str, Any]) -> str:
     state["status"] = "resuming"
     state_path.write_text(json.dumps(state, indent=2))
 
-    hermes_root = Path("/home/fede/.hermes/hermes-agent")
+    hermes_root = get_hermes_home() / "hermes-agent"
     cmd = (
         f"cd {shlex.quote(str(hermes_root))} && "
         f"source venv/bin/activate && "
