@@ -49,6 +49,12 @@ def _load_config_for_job() -> dict[str, Any]:
     }
 
 
+def _lattice_available() -> bool:
+    """Check whether Lattice is initialized so research jobs can post comments."""
+    lattice_dir = get_hermes_home() / "org" / ".lattice"
+    return lattice_dir.exists() and (lattice_dir / "ids.json").exists()
+
+
 # ---------------------------------------------------------------------------
 # Tool schema
 # ---------------------------------------------------------------------------
@@ -141,6 +147,13 @@ RESEARCH_JOB_SCHEMA = {
 def _action_start(args: dict[str, Any]) -> str:
     job_id = args.get("job_id") or secrets.token_hex(8)
     cfg = _load_config_for_job()
+    lattice_task_id = args.get("lattice_task_id")
+    if lattice_task_id and not _lattice_available():
+        logger.warning(
+            "Lattice task ID %s requested but ~/.hermes/org/.lattice/ is not initialized. "
+            "Progress comments will be skipped. Run 'cd ~/.hermes/org && lattice init' to enable.",
+            lattice_task_id,
+        )
 
     spec = {
         "job_id": job_id,

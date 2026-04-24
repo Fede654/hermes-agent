@@ -170,6 +170,25 @@ Override with `worker_toolsets` parameter in `supervisor.run()`.
 | `HERMES_YOLO_MODE=1` | Skip command approval (required for workers) |
 | `DELEGATION_MAX_CONCURRENT_CHILDREN=3` | Parallel workers (default 3) |
 
+## Lattice Integration (Optional)
+
+If you pass `lattice_task_id` when starting a research job, the supervisor will post round-by-round progress comments to that Lattice task. This requires:
+
+1. Lattice initialized at `~/.hermes/org/.lattice/` (run `lattice init` in `~/.hermes/org` if missing)
+2. The target task ID must exist in that Lattice database
+
+If Lattice is not available, the research job still runs normally — only the progress comments are skipped. Check `runner.log` for "Lattice comment failed" warnings if you expected comments but don't see them.
+
+### Verifying Lattice availability
+
+```bash
+# Quick check
+ls ~/.hermes/org/.lattice/ids.json
+
+# If missing, initialize:
+cd ~/.hermes/org && lattice init
+```
+
 ## Git Workflow for AutoResearch Changes
 
 All changes to the autoresearch stack are committed to branch `feat/hermes-autoresearch-upstream`:
