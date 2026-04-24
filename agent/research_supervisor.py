@@ -135,6 +135,9 @@ def _think_block(spec: TaskSpec, iteration: int) -> str:
     return f"""\
 ## Step 0 — Think Before Acting (Karpathy Principle 1)
 
+> Consult the `karpathy-guidelines` skill (`skills/autoresearch/karpathy-guidelines/SKILL.md`)
+> for the full set of rules — surgical edits, surface assumptions, no overcomplication.
+
 Before producing anything, state in your output:
 
 1. **Assumption**: What do you understand the task to be asking for?

@@ -134,8 +134,21 @@ Measured on kimi-for-coding via kimi-coding provider:
 
 1. Read `runner.log` for traceback
 2. Fix the issue (e.g., missing field in job.json)
-3. Delete `.runner.lock` if stale
+3. Delete `.runner.lock` if stale (see below)
 4. Relaunch
+
+### Scenario: Stale `.runner.lock` after crash
+
+The lock file holds the runner PID. To verify it's actually stale before deleting:
+
+```bash
+PID=$(cat ~/.hermes/research-jobs/<job_id>/.runner.lock)
+ps -p "$PID" > /dev/null && echo "STILL RUNNING (PID $PID)" || echo "stale, safe to remove"
+rm -f ~/.hermes/research-jobs/<job_id>/.runner.lock   # only if stale
+```
+
+Never blind-delete the lock while the runner is alive — you'll get duplicate
+processes writing to the same checkpoint and corrupted state.
 
 ### Scenario: Want to resume from checkpoint
 
