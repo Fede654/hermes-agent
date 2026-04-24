@@ -43,6 +43,10 @@ from agent.research_metrics import UniversalMetricParser
 
 logger = logging.getLogger(__name__)
 
+# Matches the first decimal in a judge response — tolerates prefixes like
+# "Score:" or suffixes like "/1.0" that the older tokens[0] parser choked on.
+_JUDGE_SCORE_RE = re.compile(r"-?\d+(?:\.\d+)?")
+
 _parser = UniversalMetricParser()
 
 
@@ -1031,20 +1035,30 @@ class ResearchSupervisor:
             f"Return ONLY a decimal number, nothing else."
         )
         prompt = f"{eval_prompt}\n\nDeliverable:\n{deliverable[:4000]}\n\nScore (0.0–1.0):"
+        content = ""
         try:
             response = llm.chat(
                 [{"role": "user", "content": prompt}],
                 system="You are an objective evaluator. Return only a decimal number between 0.0 and 1.0.",
             )
             content = (getattr(response, "content", "") or "").strip()
-            tokens = content.split()
-            if not tokens:
+            if not content:
                 logger.warning("LLM judge returned empty response")
                 return None
-            raw = tokens[0].rstrip(".,")
-            return max(0.0, min(1.0, float(raw)))
+            # Extract the first decimal found anywhere — tolerates prose like
+            # "Score: 0.85", "0.8/1.0", "The score is 0.7 because …".
+            match = _JUDGE_SCORE_RE.search(content)
+            if match is None:
+                logger.warning(
+                    "LLM judge response had no numeric score; raw=%r",
+                    content[:200],
+                )
+                return None
+            return max(0.0, min(1.0, float(match.group())))
         except Exception as exc:
-            logger.warning("LLM judge scoring failed: %s", exc)
+            logger.warning(
+                "LLM judge scoring failed: %s; raw=%r", exc, content[:200]
+            )
             return None
 
 
