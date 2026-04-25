@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from unittest.mock import patch, MagicMock
 
-from agent.factory import build_agent_for_research_job, _apply_runtime_invariants
+from agent.factory import build_agent_for_research_job
 
 
 # A minimal spec the factory should accept.
@@ -47,44 +47,28 @@ class TestBuildAgentForResearchJob:
         assert captured["skip_context_files"] is True
         assert captured["skip_memory"] is True
 
-    def test_runtime_invariants_applied(self):
-        """The factory must set the post-init attrs delegate_task expects.
+    def test_runtime_invariants_passed_as_kwargs(self):
+        """After HRM-57 full, the runtime invariants are constructor kwargs.
+        The factory must hand them to AIAgent rather than patch post-init."""
+        captured: dict = {}
+        with patch("run_agent.AIAgent") as MockAgent:
+            MockAgent.side_effect = lambda *a, **kw: captured.update(kw) or MagicMock(tool_progress_callback=None)
+            build_agent_for_research_job(_SPEC)
 
-        Use a plain object so attribute assignments are observable directly,
-        sidestepping MagicMock's restrictions on __setattr__ override.
-        """
-        class FakeAgent:
-            def __init__(self, *_a, **_kw):
-                pass
+        assert captured["delegate_depth"] == 0
+        assert "terminal_cwd" in captured
+        assert "cwd" in captured
+        assert captured["subdirectory_hints"] is None
 
-        with patch("run_agent.AIAgent", FakeAgent):
+    def test_progress_callback_is_no_op_when_none(self):
+        """The factory still sets a no-op tool_progress_callback when AIAgent
+        leaves it as None — callers can dispatch without nil-checking."""
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_agent = MagicMock()
+            mock_agent.tool_progress_callback = None
+            MockAgent.return_value = mock_agent
             agent = build_agent_for_research_job(_SPEC)
 
-        for attr in (
-            "_delegate_depth", "terminal_cwd", "cwd", "_subdirectory_hints",
-            "_delegate_spinner", "tool_progress_callback",
-            "providers_allowed", "providers_ignored",
-            "providers_order", "provider_sort",
-        ):
-            assert hasattr(agent, attr), f"factory must set {attr}"
-
-        assert agent._delegate_depth == 0
-        assert agent._subdirectory_hints is None
-        assert agent._delegate_spinner is None
-        assert agent.terminal_cwd == os.getcwd()
-        assert agent.cwd == os.getcwd()
-
-
-class TestApplyRuntimeInvariants:
-    def test_idempotent_on_simple_object(self):
-        """Calling _apply_runtime_invariants twice must not raise and
-        must end with the same final state."""
-        class Bag:
-            pass
-
-        bag = Bag()
-        _apply_runtime_invariants(bag)
-        first = (bag._delegate_depth, bag.cwd, bag._subdirectory_hints)
-        _apply_runtime_invariants(bag)
-        second = (bag._delegate_depth, bag.cwd, bag._subdirectory_hints)
-        assert first == second
+        assert agent.tool_progress_callback is not None
+        # Calling it should not raise
+        agent.tool_progress_callback("event", "name", "preview")

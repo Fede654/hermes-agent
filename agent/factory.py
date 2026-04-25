@@ -49,32 +49,22 @@ def build_agent_for_research_job(spec: dict[str, Any]) -> Any:
         session_id=f"research-job:{spec['job_id']}",
         skip_context_files=spec.get("skip_context_files", False),
         skip_memory=spec.get("skip_memory", False),
+        # HRM-57 full: the five formerly-patched runtime invariants are now
+        # constructor kwargs on AIAgent. terminal_cwd / cwd default to
+        # env-derived values inside __init__; the rest are zero/None defaults
+        # appropriate for a top-level detached parent.
+        delegate_depth=0,
+        terminal_cwd=os.getcwd(),
+        cwd=os.getcwd(),
+        subdirectory_hints=None,
     )
 
-    _apply_runtime_invariants(agent)
+    # Only the progress callback still needs post-init wiring because it is
+    # not a constructor kwarg today. tool_progress_callback IS in __init__,
+    # but defaults to None — set a no-op so callers that read it can dispatch
+    # without checking. provider_* are honored by __init__ from the spec, so
+    # the previous defensive getattr block is no longer necessary.
+    if agent.tool_progress_callback is None:
+        agent.tool_progress_callback = lambda *a, **k: None
+
     return agent
-
-
-def _apply_runtime_invariants(agent: Any) -> None:
-    """Set internal attributes that ``delegate_task`` expects but that
-    ``AIAgent.__init__`` does not currently take as kwargs.
-
-    Each attribute below is also assigned by ``AIAgent.__init__`` itself
-    in the interactive flow — but only after entering ``run_conversation``
-    or similar. For a detached parent that just hands the agent off to
-    the supervisor, these would otherwise stay unset and ``delegate_task``
-    would raise ``AttributeError`` on the first worker spawn.
-
-    KEEP IN SYNC with AIAgent. Adding a new attribute that delegate_task
-    reads from the parent means adding it here too.
-    """
-    agent._delegate_depth = 0
-    agent.terminal_cwd = os.getcwd()
-    agent.cwd = os.getcwd()
-    agent._subdirectory_hints = None
-    agent._delegate_spinner = None
-    agent.tool_progress_callback = lambda *a, **k: None
-    agent.providers_allowed = getattr(agent, "providers_allowed", None)
-    agent.providers_ignored = getattr(agent, "providers_ignored", None)
-    agent.providers_order = getattr(agent, "providers_order", None)
-    agent.provider_sort = getattr(agent, "provider_sort", None)
