@@ -34,18 +34,12 @@ toolsets:
   - skills
   - todo
 
-# MCP servers — operational backbone of the team
-#   lattice: event-sourced task tracker (coordination, audit trail)
-# Vault interaction is intentionally MCP-free: the wiki lives as plain
-# Markdown in a git repo, and the agent reads/writes it through standard
-# file + grep + git tools (see SOUL.md). Set HERMES_VAULT_PATH to point at
-# the vault root.
-mcp_servers:
-  lattice:
-    command: lattice-mcp
-    env:
-      LATTICE_ROOT: ${HERMES_HOME:-${HOME}/.hermes}/org
-    enabled: true
+# MCP servers — intentionally none
+# Vault interaction goes through standard file + grep + git tools.
+# Lattice task tracking goes through the `lattice` CLI in the terminal.
+# No MCP layer over either — both already have first-class CLI/text interfaces.
+# Set HERMES_VAULT_PATH for the vault root and LATTICE_ROOT for the task tracker.
+mcp_servers: {}
 
 agent:
   max_turns: 80
@@ -65,16 +59,17 @@ chain**, connected to two shared systems:
   with standard file tools (`grep -r`, `cat`, `Read`). Write with `Write`/`Edit`
   and commit with `git` so changes are versioned and reviewable. **No MCP layer**
   — the vault is just files in a repo.
-- **Lattice** (mcp-lattice): The team's event-sourced task tracker — every
+- **Lattice** (CLI: `lattice`): The team's event-sourced task tracker — every
   research run must be tracked as a Lattice task with round-by-round progress
-  comments. This is the audit trail and coordination layer.
+  comments. This is the audit trail and coordination layer. Invoke via the
+  terminal — `lattice create`, `lattice comment`, `lattice complete`, etc.
 
 ## Operational Context
 
 Before starting any research:
 1. **Search the vault** for existing work — `grep -r "<topic>" $HERMES_VAULT_PATH`
 2. **Read relevant notes directly** with `Read` / `cat` to avoid duplicating effort
-3. **Create a Lattice task** for tracking (`mcp_lattice_lattice_create`)
+3. **Create a Lattice task** for tracking — `lattice create "Research: <topic>" --actor agent:researcher`
 4. After completion, **write findings into the vault**, **commit with git**,
    and **close the Lattice task**
 
@@ -87,11 +82,12 @@ After research completes:
    lattice complete <task_id> --actor agent:researcher --review "<summary>"
    ```
 
-**Degraded mode**: If Lattice MCP is unavailable, declare degraded mode:
+**Degraded mode**: If the `lattice` CLI is unavailable (binary missing, LATTICE_ROOT
+unwritable), declare degraded mode:
 - State: "Lattice offline — running without coordination integration"
 - Continue research if the core task is still possible
 - Vault read/write still works — it's just files
-- Retry MCP connection before the next research run
+- Verify `lattice doctor` passes before the next research run
 
 ## Core Behavior
 
@@ -217,23 +213,24 @@ Interact with standard tools — no abstraction layer.
 **Why no MCP**: the vault is plain Markdown; standard text + git tools are
 simpler, more debuggable, and let any agent (not just Hermes) interact with it.
 
-## Lattice integration (MCP)
+## Lattice integration (CLI)
 
-Lattice is the coordination layer. Use it for:
+Lattice is the coordination layer. Invoke via the terminal — no MCP layer.
 
 - **Task creation**: Every research run starts with a Lattice task
   ```
-  mcp_lattice_lattice_create(title="Research: <topic>", actor="agent:researcher")
+  lattice create "Research: <topic>" --actor agent:researcher
   ```
 - **Progress tracking**: The supervisor auto-posts round comments, but you can
   also post manual updates
   ```
-  mcp_lattice_lattice_comment(task_id="LAT-42", text="Baseline complete: pass_rate=1.0")
+  lattice comment LAT-42 "Baseline complete: pass_rate=1.0" --actor agent:researcher
   ```
 - **Completion**: Mark done and link artifacts (use `complete`, not `status`):
   ```
   lattice complete <task_id> --actor agent:researcher --review "<summary>"
   ```
+- **History/audit**: `lattice show <task_id>`, `lattice list`, `lattice comments <task_id>`.
 
 ## Metric patterns by task type
 
