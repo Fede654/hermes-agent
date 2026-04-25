@@ -498,6 +498,10 @@ class ResearchSupervisor:
 
         if llm is None:
             lattice_comment_fn(f"Baseline only. best={runner.history.baseline_metric}")
+            try:
+                self._evolve(runner.history, spec, run_id)
+            except Exception as exc:
+                logger.warning("Evolution persistence failed for %s: %s", run_id, exc)
             return runner.history
 
         # Determine early-stop parameters based on baseline quality
@@ -583,6 +587,14 @@ class ResearchSupervisor:
                 f"Loop done: {len(runner.history.results)} rounds, "
                 f"best={best.primary_metric if best else None}"
             )
+
+        # Persist lessons for cross-run learning. Append-only — failure here
+        # must not affect the loop's return value.
+        try:
+            self._evolve(runner.history, spec, run_id)
+        except Exception as exc:
+            logger.warning("Evolution persistence failed for %s: %s", run_id, exc)
+
         return runner.history
 
     # ------------------------------------------------------------------
@@ -1018,6 +1030,76 @@ class ResearchSupervisor:
             return extracted if extracted.strip() else candidate.strip()
 
         return candidate.strip()
+
+    # ------------------------------------------------------------------
+    # Evolution — persist lessons across runs (HRM-59 v1)
+    # ------------------------------------------------------------------
+
+    def _evolve(self, history: Any, spec: TaskSpec, run_id: str) -> None:
+        """Append per-iteration lessons from this run to the EvolutionStore.
+
+        Adapter between ExperimentResult (Karpathy loop) and LessonEntry
+        (ResearchClaw schema). v1 only persists; prompt overlay injection
+        is intentionally deferred to v2 so this hook stays append-only and
+        cannot affect ongoing or future loops if it misbehaves.
+        """
+        from datetime import datetime, timezone
+        from agent.research_evolution import (
+            EvolutionStore,
+            LessonEntry,
+            LessonCategory,
+            _classify_error,
+        )
+
+        results = getattr(history, "results", []) or []
+        if not results:
+            return
+
+        now = datetime.now(timezone.utc).isoformat()
+        lessons: list[LessonEntry] = []
+
+        for result in results:
+            iteration = getattr(result, "iteration", 0)
+            stage_name = f"iter_{iteration}"
+            error = getattr(result, "error", None)
+            improved = getattr(result, "improved", False)
+            kept = getattr(result, "kept", False)
+            metric = getattr(result, "primary_metric", None)
+
+            if error:
+                lessons.append(LessonEntry(
+                    stage_name=stage_name,
+                    stage_num=iteration,
+                    category=_classify_error(stage_name, str(error)),
+                    severity="error",
+                    description=f"{spec.metric_key}: {error}",
+                    timestamp=now,
+                    run_id=run_id,
+                ))
+            elif improved and kept:
+                lessons.append(LessonEntry(
+                    stage_name=stage_name,
+                    stage_num=iteration,
+                    category=LessonCategory.PIPELINE,
+                    severity="info",
+                    description=f"{spec.metric_key} improved to {metric}",
+                    timestamp=now,
+                    run_id=run_id,
+                ))
+            else:
+                lessons.append(LessonEntry(
+                    stage_name=stage_name,
+                    stage_num=iteration,
+                    category=LessonCategory.PIPELINE,
+                    severity="warning",
+                    description=f"{spec.metric_key}={metric} no improvement, attempt discarded",
+                    timestamp=now,
+                    run_id=run_id,
+                ))
+
+        store_dir = get_hermes_home() / "evolution"
+        store = EvolutionStore(store_dir)
+        store.append_many(lessons)
 
     # ------------------------------------------------------------------
     # LLM judge evaluator

@@ -498,3 +498,57 @@ class TestResearchSupervisorIterations:
         # baseline + 3 failing iterations = 4 total
         assert len(history.results) == 4
         assert call_count == 4
+
+
+# ---------------------------------------------------------------------------
+# HRM-59: EvolutionStore wiring v1 — persist lessons after run()
+# ---------------------------------------------------------------------------
+
+class TestEvolutionPersistence:
+    def test_evolve_writes_one_lesson_per_iteration(
+        self, tmp_workspace: Path, mock_parent_agent: MagicMock, code_spec: TaskSpec, tmp_path: Path
+    ):
+        """After run() returns, the EvolutionStore JSONL must have one entry
+        per ExperimentResult — covering improved/discarded/error severities."""
+        from agent.research_evolution import EvolutionStore
+
+        evolution_dir = tmp_path / "evolution-home" / "evolution"
+
+        with patch("tools.delegate_tool.delegate_task", return_value=_make_delegate_result(0.85)), \
+             patch("agent.research_supervisor.get_hermes_home", return_value=tmp_path / "evolution-home"):
+            supervisor = ResearchSupervisor(
+                parent_agent=mock_parent_agent,
+                workspace=tmp_workspace,
+            )
+            supervisor.run(
+                code_spec,
+                initial_attempt="print('accuracy: 0.85')",
+                run_id="evo-test-001",
+                llm=None,  # baseline only -> 1 result
+            )
+
+        lessons = EvolutionStore(evolution_dir).load_all()
+        assert len(lessons) == 1, "baseline-only run produces one lesson"
+        assert lessons[0].run_id == "evo-test-001"
+        assert lessons[0].stage_name == "iter_0"
+        assert lessons[0].severity in {"info", "warning"}
+
+    def test_evolve_failure_does_not_break_run(
+        self, tmp_workspace: Path, mock_parent_agent: MagicMock, code_spec: TaskSpec, tmp_path: Path
+    ):
+        """If _evolve raises, run() must still return the history cleanly."""
+        with patch("tools.delegate_tool.delegate_task", return_value=_make_delegate_result(0.9)), \
+             patch.object(ResearchSupervisor, "_evolve", side_effect=RuntimeError("disk full")):
+            supervisor = ResearchSupervisor(
+                parent_agent=mock_parent_agent,
+                workspace=tmp_workspace,
+            )
+            history = supervisor.run(
+                code_spec,
+                initial_attempt="print('ok')",
+                run_id="evo-fail-001",
+                llm=None,
+            )
+
+        assert history is not None
+        assert len(history.results) == 1
