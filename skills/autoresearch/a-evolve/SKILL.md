@@ -150,9 +150,9 @@ For Hermes AutoResearch projects, recommended locations:
 | Artifact | Location |
 |----------|----------|
 | Evolved skill | `skills/autoresearch/evolved/<skill-name>/SKILL.md` |
-| Prompt patch | Append to `prompts/autoresearch.yaml` |
-| Knowledge entry | `agent/evolution_store.jsonl` via `EvolutionStore.append_many()` |
-| Observation log | `artifacts/hermes-research-<run_id>/observations/<batch>.md` |
+| Prompt patch | Edit the inline templates in `agent/research_supervisor.py:_build_task_brief` |
+| Knowledge entry | `~/.hermes/evolution/lessons.jsonl` via `EvolutionStore.append_many()` |
+| Observation log | `~/.hermes/research-workspace/<run_id>/observations/<batch>.md` |
 
 Keep a running version log so the user can track what evolved and when:
 

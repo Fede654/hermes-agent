@@ -254,7 +254,6 @@ paths. Read directly; do not `find` or `grep` to discover them.
 | `tools/research_tool.py` | `run_research` tool handler + `_LLMBridge` |
 | `tools/research_job_tool.py` | `research_job` tool (start/status/collect/resume) |
 | `tools/delegate_tool.py` | `delegate_task`, `_build_child_agent` (~line 967) |
-| `prompts/autoresearch.yaml` | Vendored AutoResearchClaw blocks (NOT loaded by any code) |
 | `skills/autoresearch/` | Bundled skills: `karpathy-guidelines`, `a-evolve`, 7 domain skills |
 | `tests/agent/test_research_supervisor.py` | 18 integration tests |
 | `HERMES_RESEARCH.md`, `RESEARCH_AGENTS.md`, `RESEARCH_OPERATIONS.md` | Top-level docs |
