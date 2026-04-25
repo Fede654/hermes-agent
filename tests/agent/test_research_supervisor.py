@@ -552,3 +552,96 @@ class TestEvolutionPersistence:
 
         assert history is not None
         assert len(history.results) == 1
+
+
+# ---------------------------------------------------------------------------
+# HRM-62: EvolutionStore overlay wiring v2 — lessons surface in worker briefs
+# ---------------------------------------------------------------------------
+
+class TestEvolutionOverlay:
+    def test_seeded_lesson_appears_in_worker_brief(
+        self, tmp_workspace: Path, mock_parent_agent: MagicMock, code_spec: TaskSpec, tmp_path: Path
+    ):
+        """Seed a lesson into the EvolutionStore, run a baseline-only experiment,
+        and assert the worker's task_brief.md contains the seeded text."""
+        from agent.research.evolution import EvolutionStore, LessonEntry, LessonCategory
+        from datetime import datetime, timezone
+
+        evolution_dir = tmp_path / "evolution-home" / "evolution"
+        evolution_dir.mkdir(parents=True)
+        EvolutionStore(evolution_dir).append(LessonEntry(
+            stage_name="research_loop",
+            stage_num=0,
+            category=LessonCategory.PIPELINE,
+            severity="error",
+            description="ALPHA-MARKER-XYZ: workers must validate metric before reporting",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            run_id="seed-001",
+        ))
+
+        with patch("tools.delegate_tool.delegate_task", return_value=_make_delegate_result(0.85)), \
+             patch("agent.research.supervisor.get_hermes_home", return_value=tmp_path / "evolution-home"):
+            supervisor = ResearchSupervisor(
+                parent_agent=mock_parent_agent,
+                workspace=tmp_workspace,
+            )
+            supervisor.run(
+                code_spec,
+                initial_attempt="print('accuracy: 0.85')",
+                run_id="overlay-test-001",
+                llm=None,
+            )
+
+        run_dir = tmp_workspace / "overlay-test-001"
+        round_dirs = [p for p in run_dir.iterdir() if p.is_dir()]
+        brief_text = (round_dirs[0] / "task_brief.md").read_text()
+        assert "ALPHA-MARKER-XYZ" in brief_text, "seeded lesson must surface in worker brief"
+        assert "Lessons from Prior Runs" in brief_text, "overlay header expected"
+
+    def test_no_overlay_when_store_empty(
+        self, tmp_workspace: Path, mock_parent_agent: MagicMock, code_spec: TaskSpec, tmp_path: Path
+    ):
+        """With no past lessons, the brief is unchanged — no empty overlay header."""
+        with patch("tools.delegate_tool.delegate_task", return_value=_make_delegate_result(0.8)), \
+             patch("agent.research.supervisor.get_hermes_home", return_value=tmp_path / "fresh-home"):
+            supervisor = ResearchSupervisor(
+                parent_agent=mock_parent_agent,
+                workspace=tmp_workspace,
+            )
+            supervisor.run(
+                code_spec,
+                initial_attempt="print('ok')",
+                run_id="empty-overlay-001",
+                llm=None,
+            )
+
+        run_dir = tmp_workspace / "empty-overlay-001"
+        round_dirs = [p for p in run_dir.iterdir() if p.is_dir()]
+        brief_text = (round_dirs[0] / "task_brief.md").read_text()
+        assert "Lessons from Prior Runs" not in brief_text
+        # And the brief still starts with the normal builder output
+        assert brief_text.lstrip().startswith("# Task Brief")
+
+    def test_overlay_load_failure_does_not_break_run(
+        self, tmp_workspace: Path, mock_parent_agent: MagicMock, code_spec: TaskSpec
+    ):
+        """If _load_evolution_overlay raises, run() must still complete cleanly."""
+        with patch("tools.delegate_tool.delegate_task", return_value=_make_delegate_result(0.9)), \
+             patch.object(ResearchSupervisor, "_load_evolution_overlay", side_effect=RuntimeError("disk read failed")):
+            supervisor = ResearchSupervisor(
+                parent_agent=mock_parent_agent,
+                workspace=tmp_workspace,
+            )
+            # run() invokes the helper directly; without protection it would propagate.
+            # The helper itself catches; the test asserts the user-facing contract: no propagation.
+            try:
+                history = supervisor.run(
+                    code_spec,
+                    initial_attempt="x",
+                    run_id="overlay-fail-001",
+                    llm=None,
+                )
+            except RuntimeError:
+                # If propagation happens, mark as failure explicitly.
+                pytest.fail("_load_evolution_overlay failure must be swallowed")
+            assert history is not None

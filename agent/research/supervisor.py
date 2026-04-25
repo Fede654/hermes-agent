@@ -416,6 +416,8 @@ class ResearchSupervisor:
         self._workspace = workspace or (get_hermes_home() / "research-workspace")
         self._lattice_task_id = lattice_task_id
         self._lattice_root = lattice_root
+        # Populated by run() — past-run lessons prepended to every worker brief.
+        self._evolution_overlay: str = ""
 
     def run(
         self,
@@ -457,6 +459,16 @@ class ResearchSupervisor:
         lattice_comment_fn = _make_lattice_comment_fn(
             self._lattice_task_id, self._lattice_root
         )
+
+        # Load past-run lessons once per run; cap size to avoid token blow-up.
+        # Failure must not break the loop — overlay is best-effort. The helper
+        # already catches its own errors, but wrap here too as defense in depth
+        # (matches the _evolve call site at the bottom of run()).
+        try:
+            self._evolution_overlay = self._load_evolution_overlay()
+        except Exception as exc:
+            logger.warning("Evolution overlay load failed at run start: %s", exc)
+            self._evolution_overlay = ""
 
         toolsets = worker_toolsets or spec.default_toolsets()
         attempt_holder: list[str] = [initial_attempt]
@@ -622,13 +634,18 @@ class ResearchSupervisor:
         attempt_filename = _ATTEMPT_FILENAME.get(spec.task_type, "attempt.md")
         (wd / attempt_filename).write_text(attempt, encoding="utf-8")
 
-        # Write the task brief
+        # Write the task brief, with optional EvolutionStore overlay prepended.
+        # The overlay is the read-side of HRM-59 — it surfaces past-run lessons
+        # so the worker doesn't repeat known mistakes. Loaded once per run via
+        # _load_evolution_overlay() and cached on the supervisor instance.
         brief = _build_task_brief(
             spec,
             iteration=iteration,
             round_dir=working_dir,
             time_budget_sec=time_budget_sec,
         )
+        if self._evolution_overlay:
+            brief = self._evolution_overlay + "\n\n---\n\n" + brief
         (wd / "task_brief.md").write_text(brief, encoding="utf-8")
 
         context = (
@@ -1033,7 +1050,36 @@ class ResearchSupervisor:
 
     # ------------------------------------------------------------------
     # Evolution — persist lessons across runs (HRM-59 v1)
+    # and surface them to next-run workers (HRM-62 v2)
     # ------------------------------------------------------------------
+
+    _OVERLAY_MAX_CHARS = 1500
+    _OVERLAY_MAX_LESSONS = 3
+
+    def _load_evolution_overlay(self) -> str:
+        """Load past-run lessons formatted for prepending to worker briefs.
+
+        Reads from EvolutionStore at $HERMES_HOME/evolution and uses
+        build_overlay() with a research-loop scope. Capped at
+        _OVERLAY_MAX_CHARS to bound prompt-token cost. Returns empty
+        string on any failure — the loop must run with or without lessons.
+        """
+        try:
+            from agent.research.evolution import EvolutionStore
+
+            store_dir = get_hermes_home() / "evolution"
+            if not store_dir.exists():
+                return ""
+            overlay = EvolutionStore(store_dir).build_overlay(
+                stage_name="research_loop",
+                max_lessons=self._OVERLAY_MAX_LESSONS,
+            )
+            if len(overlay) > self._OVERLAY_MAX_CHARS:
+                overlay = overlay[: self._OVERLAY_MAX_CHARS] + "\n\n[... overlay truncated ...]"
+            return overlay
+        except Exception as exc:
+            logger.warning("Evolution overlay load failed: %s", exc)
+            return ""
 
     def _evolve(self, history: Any, spec: TaskSpec, run_id: str) -> None:
         """Append per-iteration lessons from this run to the EvolutionStore.
