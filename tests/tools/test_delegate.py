@@ -379,6 +379,49 @@ class TestToolNamePreservation(unittest.TestCase):
                     f"_saved_tool_names leaked back into wrong scope: {exc}"
                 )
 
+    def test_inherit_profile_default_keeps_blank_slate(self):
+        """Default inherit_profile=False -> child runs with skip_context_files=True
+        and skip_memory=True, preserving the historical batch/data-gen behavior."""
+        parent = _make_mock_parent(depth=0)
+        captured = {}
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            MockAgent.side_effect = lambda *a, **kw: captured.update(kw) or MagicMock()
+            _build_child_agent(
+                task_index=0,
+                goal="batch task",
+                context=None,
+                toolsets=None,
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+        self.assertTrue(captured.get("skip_context_files"))
+        self.assertTrue(captured.get("skip_memory"))
+
+    def test_inherit_profile_true_loads_profile_context(self):
+        """inherit_profile=True flips both skips to False so the child loads
+        SOUL.md / AGENTS.md / MEMORY.md from the active profile."""
+        parent = _make_mock_parent(depth=0)
+        captured = {}
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            MockAgent.side_effect = lambda *a, **kw: captured.update(kw) or MagicMock()
+            _build_child_agent(
+                task_index=0,
+                goal="research worker",
+                context=None,
+                toolsets=None,
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+                inherit_profile=True,
+            )
+        self.assertFalse(captured.get("skip_context_files"))
+        self.assertFalse(captured.get("skip_memory"))
+
     def test_saved_tool_names_set_on_child_before_run(self):
         """_run_single_child must set _delegate_saved_tool_names on the child
         from model_tools._last_resolved_tool_names before run_conversation."""

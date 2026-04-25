@@ -373,7 +373,7 @@ class TestResearchSupervisorBaseline:
         call_count = 0
         BEST_ARTIFACT = "# best on-disk version\nprint('accuracy: 0.90')"
 
-        def capturing_delegate(goal, context, toolsets, parent_agent):
+        def capturing_delegate(goal, context, toolsets, parent_agent, inherit_profile=False):
             nonlocal call_count
             call_count += 1
             # Find the round dir from goal string and write a modified attempt.py
@@ -429,7 +429,7 @@ class TestResearchSupervisorIterations:
         """Loop improves once then plateaus — verifies history and best_result."""
         metric_sequence = iter([0.70, 0.82, 0.81, 0.80])  # baseline, iter1 improves, iter2/3 regress
 
-        def side_effect(goal, context, toolsets, parent_agent):
+        def side_effect(goal, context, toolsets, parent_agent, inherit_profile=False):
             val = next(metric_sequence, 0.80)
             return _make_delegate_result(val)
 
@@ -465,7 +465,7 @@ class TestResearchSupervisorIterations:
         """Loop stops early after 3 consecutive non-improving iterations."""
         call_count = 0
 
-        def side_effect(goal, context, toolsets, parent_agent):
+        def side_effect(goal, context, toolsets, parent_agent, inherit_profile=False):
             nonlocal call_count
             call_count += 1
             if call_count == 1:

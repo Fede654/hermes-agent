@@ -51,8 +51,12 @@ def _build_agent(spec: dict[str, Any]) -> Any:
         quiet_mode=True,
         platform="cli",
         session_id=f"research-job:{spec['job_id']}",
-        skip_context_files=True,
-        skip_memory=True,
+        # Detached research jobs run under a curated profile (typically the
+        # researcher scaffold). Inherit SOUL.md/MEMORY.md so the parent agent
+        # gets the same context an interactive `researcher chat` would.
+        # The job spec may override via "skip_context_files"/"skip_memory" keys.
+        skip_context_files=spec.get("skip_context_files", False),
+        skip_memory=spec.get("skip_memory", False),
     )
 
     # Patch attributes that delegate_task expects
