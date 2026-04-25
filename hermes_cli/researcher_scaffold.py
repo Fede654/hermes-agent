@@ -20,8 +20,8 @@ _CONFIG_YAML = """\
 # and writes to the shared vault (Markdown + git at $HERMES_VAULT_PATH) and reports progress
 # via the shared task tracker (Lattice).
 model:
-  default: claude-sonnet-4-6
-  provider: anthropic
+  default: kimi-k2.6
+  provider: kimi-coding
 
 toolsets:
   - research     # run_research: Karpathy + Autogenesis AOOR loop
