@@ -167,6 +167,60 @@ via `delegate_task` internally. Just call the tool directly.
 - Never fabricate findings — only report what `run_research` actually produced
 - If the metric is low, say so honestly and diagnose why
 - Cite the `learnings_file` as the audit trail for your conclusions
+
+## Tool usage patterns (lessons from prior research swarms)
+
+These patterns avoid common errors observed in past research sessions. Follow
+them by default — they save tool calls and prevent retries.
+
+### Long Lattice comments — write to file, then heredoc
+
+Inline comment text with embedded quotes, newlines, or `$()` expansions is
+fragile. The reliable pattern:
+
+```
+write_file /tmp/<task-id>-comment.txt "<full markdown content>"
+cd $LATTICE_ROOT && lattice comment <task-id> "$(cat /tmp/<task-id>-comment.txt)" --actor agent:researcher
+```
+
+Skip the inline-first attempt. Go straight to file + cat for anything over
+two lines.
+
+### File reads — generous range, no re-reads
+
+Read with explicit offset+limit covering what you need on the first pass.
+Re-read a file only after you have *edited* it; do not re-read by inertia
+to "remember the section." If you genuinely need a different section than
+the first read, request it once with the right offset.
+
+### `grep` alternation — use `-E` or `-P`, never `\|`
+
+Bash escape of `\|` inside double quotes is fragile and frequently fails.
+Always:
+
+```
+grep -E "pattern_a|pattern_b"   # extended regex
+grep -P "pattern_a|pattern_b"   # perl-compat
+```
+
+Never `grep "pattern_a\|pattern_b"`.
+
+### Heredoc tag must not appear in body
+
+If your content might contain words like `ANALYSIS`, `EOF`, `END`, do not
+use them as the heredoc tag. Use a unique, scoped tag:
+
+```
+cat <<'EOF_HRM57' > /tmp/x.txt
+... content that may contain EOF or ANALYSIS literally ...
+EOF_HRM57
+```
+
+### Do NOT use `execute_code` to import internal Hermes modules
+
+`from hermes_tools import read_file` and similar do not work — these are
+agent tools, not Python modules. Use the `read_file` tool dispatch directly.
+`execute_code` is for *running computation*, not for tool routing.
 """
 
 _MEMORY_MD = """\
@@ -184,6 +238,26 @@ Each `run_research` call creates a subdirectory named by run_id:
   - round-*/task_brief.md  — worker instructions per iteration
   - round-*/attempt.py or attempt.md  — actual deliverable per round
   - round-*/results.json  — structured metrics
+
+## Codebase layout — research subsystem
+
+When investigating the AutoResearch implementation, these are the canonical
+paths. Read directly; do not `find` or `grep` to discover them.
+
+| Path | Role |
+|------|------|
+| `agent/research_supervisor.py` | Karpathy loop core — `ResearchSupervisor`, `TaskSpec`, `_build_task_brief`, `_score_with_llm_judge` |
+| `agent/research_runner.py` | `ExperimentRunner`, `ExperimentHistory`, `ExperimentResult` |
+| `agent/research_job_runner.py` | Detached OS process entrypoint — `_build_agent`, `main` |
+| `agent/research_evolution.py` | `EvolutionStore`, `extract_lessons` (vendored, currently unwired) |
+| `agent/research_metrics.py` | `UniversalMetricParser` for results.json + stdout |
+| `tools/research_tool.py` | `run_research` tool handler + `_LLMBridge` |
+| `tools/research_job_tool.py` | `research_job` tool (start/status/collect/resume) |
+| `tools/delegate_tool.py` | `delegate_task`, `_build_child_agent` (~line 967) |
+| `prompts/autoresearch.yaml` | Vendored AutoResearchClaw blocks (NOT loaded by any code) |
+| `skills/autoresearch/` | Bundled skills: `karpathy-guidelines`, `a-evolve`, 7 domain skills |
+| `tests/agent/test_research_supervisor.py` | 18 integration tests |
+| `HERMES_RESEARCH.md`, `RESEARCH_AGENTS.md`, `RESEARCH_OPERATIONS.md` | Top-level docs |
 
 ## Vault integration (plain Markdown + git, no MCP)
 
