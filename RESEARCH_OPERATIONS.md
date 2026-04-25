@@ -6,7 +6,7 @@
 
 ### Method 1: Detached Runner (Recommended for >2 min tasks)
 
-Create a job spec JSON and launch via `research_job_runner`:
+Create a job spec JSON and launch via `research/job_runner`:
 
 ```json
 {
@@ -28,13 +28,13 @@ Launch:
 ```bash
 cd /path/to/hermes-agent
 source venv/bin/activate
-HERMES_YOLO_MODE=1 python -m agent.research_job_runner /path/to/job.json
+HERMES_YOLO_MODE=1 python -m agent.research.job_runner /path/to/job.json
 ```
 
 ### Method 2: Background Process (Non-blocking)
 
 ```bash
-HERMES_YOLO_MODE=1 python -m agent.research_job_runner /path/to/job.json &
+HERMES_YOLO_MODE=1 python -m agent.research.job_runner /path/to/job.json &
 ```
 
 The runner creates a `.runner.lock` file atomically. If the job is already running, it exits with code 2.
@@ -42,7 +42,7 @@ The runner creates a `.runner.lock` file atomically. If the job is already runni
 ### Method 3: Direct Python API (Blocking)
 
 ```python
-from agent.research_supervisor import ResearchSupervisor, TaskSpec
+from agent.research.supervisor import ResearchSupervisor, TaskSpec
 from pathlib import Path
 
 spec = TaskSpec(

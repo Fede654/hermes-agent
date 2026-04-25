@@ -31,14 +31,14 @@ json.dump(spec, open("/home/user/.hermes/research-jobs/my-research/job.json", "w
 
 # Launch detached runner
 source venv/bin/activate
-HERMES_YOLO_MODE=1 python -m agent.research_job_runner \
+HERMES_YOLO_MODE=1 python -m agent.research.job_runner \
     /home/user/.hermes/research-jobs/my-research/job.json
 ```
 
 ### From Python (Synchronous)
 
 ```python
-from agent.research_supervisor import ResearchSupervisor, TaskSpec
+from agent.research.supervisor import ResearchSupervisor, TaskSpec
 from pathlib import Path
 
 spec = TaskSpec(
@@ -66,7 +66,7 @@ Parent Agent / CLI
        │
        ▼
 ┌─────────────────────────┐
-│  research_job_runner    │  ← Detached OS process
+│  research/job_runner.py│  ← Detached OS process
 │  (entrypoint)           │
 └─────────────────────────┘
        │
@@ -93,10 +93,10 @@ Parent Agent / CLI
 
 ```
 agent/
-├── research_job_runner.py    # Detached entrypoint: builds AIAgent, calls run_research
-├── research_supervisor.py    # ResearchSupervisor + TaskSpec + task briefs
-├── research_runner.py        # ExperimentRunner + ExperimentHistory
-├── research_metrics.py       # UniversalMetricParser
+├── research/job_runner.py     # Detached entrypoint: builds AIAgent, calls run_research
+├── research/supervisor.py     # ResearchSupervisor + TaskSpec + task briefs
+├── research/runner.py         # ExperimentRunner + ExperimentHistory
+├── research/metrics.py        # UniversalMetricParser
 └── subdirectory_hints.py     # Progressive context discovery (cached)
 
 tools/
@@ -157,7 +157,7 @@ External monitors can read `checkpoint.json` without polling the process.
 
 | Situation | Action |
 |-----------|--------|
-| Long-running research (>5 min) | Use `research_job_runner` detached |
+| Long-running research (>5 min) | Use `research/job_runner` detached |
 | Quick experiment (<2 min) | Call `run_research()` directly |
 | Need baseline only | Set `llm=None` in supervisor |
 | Worker times out | `DelegateSandboxResult.timed_out=True`; loop continues |
@@ -168,15 +168,15 @@ External monitors can read `checkpoint.json` without polling the process.
 
 | Optimization | File | Impact |
 |-------------|------|--------|
-| **Lock file** | `research_job_runner.py` | Prevents duplicate restarts (~16 min saved) |
+| **Lock file** | `research/job_runner.py` | Prevents duplicate restarts (~16 min saved) |
 | **Provider cache** | `auxiliary_client.py` | Caches `resolve_provider_client` (~14 calls → 1) |
 | **Subdirectory hints cache** | `subdirectory_hints.py` | Caches hint loads per directory |
-| **Aggressive early stop** | `research_supervisor.py` | Baseline ≥0.9 → stop after 1 non-improving iter |
-| **LLM judge every iter** | `research_supervisor.py` | Objective scoring on all loops |
+| **Aggressive early stop** | `research/supervisor.py` | Baseline ≥0.9 → stop after 1 non-improving iter |
+| **LLM judge every iter** | `research/supervisor.py` | Objective scoring on all loops |
 
 ## Anti-Patterns
 
-- **DO NOT** run `research_job_runner` in foreground without `timeout >= 300`
+- **DO NOT** run `research/job_runner` in foreground without `timeout >= 300`
 - **DO NOT** poll the process with `ps` / `tail` — read `checkpoint.json` instead
 - **DO NOT** launch the same job twice — the lock file prevents this
 - **DO NOT** delete `.runner.lock` manually — use `kill` on the process

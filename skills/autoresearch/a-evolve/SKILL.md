@@ -150,7 +150,7 @@ For Hermes AutoResearch projects, recommended locations:
 | Artifact | Location |
 |----------|----------|
 | Evolved skill | `skills/autoresearch/evolved/<skill-name>/SKILL.md` |
-| Prompt patch | Edit the inline templates in `agent/research_supervisor.py:_build_task_brief` |
+| Prompt patch | Edit the inline templates in `agent/research/supervisor.py:_build_task_brief` |
 | Knowledge entry | `~/.hermes/evolution/lessons.jsonl` via `EvolutionStore.append_many()` |
 | Observation log | `~/.hermes/research-workspace/<run_id>/observations/<batch>.md` |
 
@@ -191,7 +191,7 @@ Do NOT:
 
 ## Relationship to EvolutionStore
 
-Hermes uses `EvolutionStore` (`agent/research_evolution.py`) as the lesson persistence layer.
+Hermes uses `EvolutionStore` (`agent/research/evolution.py`) as the lesson persistence layer.
 Evolved skills from this process can be placed in `skills/autoresearch/evolved/`
 so they are available in future research sessions. The two systems are complementary:
 

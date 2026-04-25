@@ -224,6 +224,8 @@ def _hardline_block_result(description: str) -> dict:
 # =========================================================================
 
 DANGEROUS_PATTERNS = [
+    # Specific allowlisted commands (must come before broader patterns)
+    (r'\brm\s+(-[^\s]*\s+)*/tmp\b', "rm -rf /tmp"),
     (r'\brm\s+(-[^\s]*\s+)*/', "delete in root path"),
     (r'\brm\s+-[^\s]*r', "recursive delete"),
     (r'\brm\s+--recursive\b', "recursive delete (long flag)"),

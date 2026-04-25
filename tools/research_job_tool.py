@@ -182,7 +182,7 @@ def _action_start(args: dict[str, Any]) -> str:
     cmd = (
         f"cd {shlex.quote(str(hermes_root))} && "
         f"source venv/bin/activate && "
-        f"HERMES_YOLO_MODE=1 python -m agent.research_job_runner {shlex.quote(str(spec_path))}"
+        f"HERMES_YOLO_MODE=1 python -m agent.research.job_runner {shlex.quote(str(spec_path))}"
     )
 
     # Spawn via terminal_tool in background
@@ -305,7 +305,7 @@ def _action_resume(args: dict[str, Any]) -> str:
     cmd = (
         f"cd {shlex.quote(str(hermes_root))} && "
         f"source venv/bin/activate && "
-        f"HERMES_YOLO_MODE=1 python -m agent.research_job_runner {shlex.quote(str(spec_path))}"
+        f"HERMES_YOLO_MODE=1 python -m agent.research.job_runner {shlex.quote(str(spec_path))}"
     )
 
     from tools.terminal_tool import terminal

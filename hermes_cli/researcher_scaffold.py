@@ -246,11 +246,11 @@ paths. Read directly; do not `find` or `grep` to discover them.
 
 | Path | Role |
 |------|------|
-| `agent/research_supervisor.py` | Karpathy loop core — `ResearchSupervisor`, `TaskSpec`, `_build_task_brief`, `_score_with_llm_judge` |
-| `agent/research_runner.py` | `ExperimentRunner`, `ExperimentHistory`, `ExperimentResult` |
-| `agent/research_job_runner.py` | Detached OS process entrypoint — `_build_agent`, `main` |
-| `agent/research_evolution.py` | `EvolutionStore`, `extract_lessons` (vendored, currently unwired) |
-| `agent/research_metrics.py` | `UniversalMetricParser` for results.json + stdout |
+| `agent/research/supervisor.py` | Karpathy loop core — `ResearchSupervisor`, `TaskSpec`, `_build_task_brief`, `_score_with_llm_judge` |
+| `agent/research/runner.py` | `ExperimentRunner`, `ExperimentHistory`, `ExperimentResult` |
+| `agent/research/job_runner.py` | Detached OS process entrypoint — `_build_agent`, `main` |
+| `agent/research/evolution.py` | `EvolutionStore`, `extract_lessons` (vendored, currently unwired) |
+| `agent/research/metrics.py` | `UniversalMetricParser` for results.json + stdout |
 | `tools/research_tool.py` | `run_research` tool handler + `_LLMBridge` |
 | `tools/research_job_tool.py` | `research_job` tool (start/status/collect/resume) |
 | `tools/delegate_tool.py` | `delegate_task`, `_build_child_agent` (~line 967) |

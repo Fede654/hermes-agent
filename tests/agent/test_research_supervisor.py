@@ -18,14 +18,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent.research_runner import (
+from agent.research.runner import (
     DelegateSandboxResult,
     ExperimentHistory,
     ExperimentRunner,
     HermesExperimentConfig,
 )
-from agent.research_metrics import UniversalMetricParser
-from agent.research_supervisor import (
+from agent.research.metrics import UniversalMetricParser
+from agent.research.supervisor import (
     ResearchSupervisor,
     TaskSpec,
     _build_task_brief,
@@ -510,12 +510,12 @@ class TestEvolutionPersistence:
     ):
         """After run() returns, the EvolutionStore JSONL must have one entry
         per ExperimentResult — covering improved/discarded/error severities."""
-        from agent.research_evolution import EvolutionStore
+        from agent.research.evolution import EvolutionStore
 
         evolution_dir = tmp_path / "evolution-home" / "evolution"
 
         with patch("tools.delegate_tool.delegate_task", return_value=_make_delegate_result(0.85)), \
-             patch("agent.research_supervisor.get_hermes_home", return_value=tmp_path / "evolution-home"):
+             patch("agent.research.supervisor.get_hermes_home", return_value=tmp_path / "evolution-home"):
             supervisor = ResearchSupervisor(
                 parent_agent=mock_parent_agent,
                 workspace=tmp_workspace,

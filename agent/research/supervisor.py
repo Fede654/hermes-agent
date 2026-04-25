@@ -32,14 +32,14 @@ from typing import Any, Callable, Optional
 
 from hermes_constants import get_hermes_home
 
-from agent.research_runner import (
+from agent.research.runner import (
     DelegateSandboxResult,
     ExperimentHistory,
     ExperimentResult,
     ExperimentRunner,
     HermesExperimentConfig,
 )
-from agent.research_metrics import UniversalMetricParser
+from agent.research.metrics import UniversalMetricParser
 
 logger = logging.getLogger(__name__)
 
@@ -1025,7 +1025,7 @@ class ResearchSupervisor:
 
         # For code tasks, extract from code fence if present
         if spec.task_type == "code":
-            from agent.research_runner import ExperimentRunner
+            from agent.research.runner import ExperimentRunner
             extracted = ExperimentRunner._extract_python_code(candidate)
             return extracted if extracted.strip() else candidate.strip()
 
@@ -1044,7 +1044,7 @@ class ResearchSupervisor:
         cannot affect ongoing or future loops if it misbehaves.
         """
         from datetime import datetime, timezone
-        from agent.research_evolution import (
+        from agent.research.evolution import (
             EvolutionStore,
             LessonEntry,
             LessonCategory,

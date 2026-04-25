@@ -171,7 +171,7 @@ def run_research(
     if parent_agent is None:
         return json.dumps({"error": "run_research requires a parent_agent context."})
 
-    from agent.research_supervisor import ResearchSupervisor, TaskSpec
+    from agent.research.supervisor import ResearchSupervisor, TaskSpec
     from hermes_constants import get_hermes_home
 
     spec = TaskSpec(
@@ -236,7 +236,7 @@ from tools.registry import registry, tool_error  # noqa: E402
 
 def _check_research_requirements() -> bool:
     try:
-        from agent.research_supervisor import ResearchSupervisor  # noqa: F401
+        from agent.research.supervisor import ResearchSupervisor  # noqa: F401
         return True
     except ImportError:
         return False

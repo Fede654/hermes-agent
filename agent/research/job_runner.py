@@ -1,10 +1,10 @@
-"""research_job_runner — detached process entrypoint for long-running research loops.
+"""agent.research.job_runner — detached process entrypoint for long-running research loops.
 
 Reads a job spec JSON, builds an AIAgent, calls run_research, and writes
 durable checkpoint state after every completed round.
 
 Usage:
-    python -m agent.research_job_runner /path/to/job.json
+    python -m agent.research.job_runner /path/to/job.json
 """
 
 from __future__ import annotations
@@ -127,6 +127,6 @@ def main(spec_path: str) -> int:
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python -m agent.research_job_runner <job.json>", file=sys.stderr)
+        print("Usage: python -m agent.research.job_runner <job.json>", file=sys.stderr)
         sys.exit(1)
     sys.exit(main(sys.argv[1]))
