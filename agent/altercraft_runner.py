@@ -47,6 +47,27 @@ import yaml
 
 logger = logging.getLogger("altercraft_runner")
 
+# ────────────────────────────────────────────────────────────────────────────
+# Memory helpers (lazy import to avoid circular deps)
+# ────────────────────────────────────────────────────────────────────────────
+
+def _maybe_import_memory():
+    try:
+        from agent import altercraft_memory as mem
+        return mem
+    except Exception:
+        return None
+
+
+def _memory_enabled(profile: dict) -> bool:
+    mem = profile.get("memory") or {}
+    return bool(mem.get("enabled", False))
+
+
+def _max_events(profile: dict) -> int:
+    mem = profile.get("memory") or {}
+    return mem.get("max_events", 500)
+
 
 # ────────────────────────────────────────────────────────────────────────────
 # CLI
@@ -206,7 +227,10 @@ class ReactiveLoop:
     def __init__(self, *, agent, api_url: str, mc_username: str,
                  min_seconds_between_responses: float = 10.0,
                  poll_interval_s: float = 5.0,
-                 session_dir: Path):
+                 session_dir: Path,
+                 persona: str = "",
+                 memory_enabled: bool = False,
+                 max_events: int = 500):
         self.agent = agent
         self.api_url = api_url
         self.mc_username = mc_username
@@ -217,6 +241,10 @@ class ReactiveLoop:
         self.last_seen_ms = int(time.time() * 1000)
         self._stop = threading.Event()
         self._events_fh = open(session_dir / "events.jsonl", "a", buffering=1)
+        self.persona = persona
+        self.memory_enabled = memory_enabled
+        self.max_events = max_events
+        self._mem = _maybe_import_memory()
 
     def stop(self) -> None:
         self._stop.set()
@@ -366,6 +394,23 @@ def _build_agent(profile: dict, session_id: str, model_override: Optional[str]):
     identity = profile.get("identity", {}) or {}
     mc_username = (profile.get("environment") or {}).get("mc_username") or "HermesBot"
     persona_desc = (identity.get("description") or "").strip()
+    voice = (identity.get("voice") or "").strip()
+    goals = identity.get("goals") or []
+    goals_text = "\n".join(f"- {g}" for g in goals) if goals else ""
+
+    # Load persistent memory summary if enabled
+    memory_para = ""
+    if _memory_enabled(profile):
+        mem_mod = _maybe_import_memory()
+        if mem_mod:
+            try:
+                summary = mem_mod.summarize_memory(
+                    (profile.get("name") or "").replace("altercraft-", "")
+                )
+                if summary:
+                    memory_para = f"\n\nPersistent memory:\n{summary}\n"
+            except Exception as exc:
+                logger.warning("memory summary failed: %s", exc)
 
     ephemeral_prompt = (
         f"You are embodied in Minecraft as '{mc_username}'. "
@@ -379,6 +424,12 @@ def _build_agent(profile: dict, session_id: str, model_override: Optional[str]):
         f"addressed to you, you can stay silent.\n\n"
         f"Character:\n{persona_desc}"
     )
+    if voice:
+        ephemeral_prompt += f"\n\nVoice / tone:\n{voice}"
+    if goals_text:
+        ephemeral_prompt += f"\n\nGoals:\n{goals_text}"
+    if memory_para:
+        ephemeral_prompt += memory_para
 
     max_tokens_cap = (profile.get("budget") or {}).get("max_tokens_per_task")
     max_turns = m.get("max_turns") or 20
