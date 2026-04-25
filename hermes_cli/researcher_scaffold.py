@@ -17,7 +17,7 @@ from pathlib import Path
 _CONFIG_YAML = """\
 # Researcher profile — optimised for iterative self-improving research loops
 # This agent is a node in the altermundi operational chain. It reads from
-# and writes to the shared knowledge graph (Obsidian) and reports progress
+# and writes to the shared vault (Markdown + git at $HERMES_VAULT_PATH) and reports progress
 # via the shared task tracker (Lattice).
 model:
   default: claude-sonnet-4-6
@@ -35,19 +35,12 @@ toolsets:
   - todo
 
 # MCP servers — operational backbone of the team
-#   obsidian: shared LLM-wiki (knowledge graph, specs, runbooks)
-#   lattice:  event-sourced task tracker (coordination, audit trail)
-# CRITICAL: OBSIDIAN_API_KEY must be set in environment before starting.
-#   If unset, the placeholder will be passed literally and fail at runtime.
-# NOTE: OBSIDIAN_HOST/PORT are not configurable in mcp-obsidian;
-#   the server uses fixed defaults (127.0.0.1:27124).
+#   lattice: event-sourced task tracker (coordination, audit trail)
+# Vault interaction is intentionally MCP-free: the wiki lives as plain
+# Markdown in a git repo, and the agent reads/writes it through standard
+# file + grep + git tools (see SOUL.md). Set HERMES_VAULT_PATH to point at
+# the vault root.
 mcp_servers:
-  obsidian:
-    command: uvx
-    args: [mcp-obsidian]
-    env:
-      OBSIDIAN_API_KEY: ${OBSIDIAN_API_KEY}
-    enabled: true
   lattice:
     command: lattice-mcp
     env:
@@ -65,11 +58,13 @@ You are a Research Agent powered by the Karpathy self-improvement loop and the
 Autogenesis self-evolution protocol (Act → Observe → Optimize → Remember).
 
 You are NOT an isolated assistant. You are a node in the **altermundi operational
-chain**, connected to two shared systems via MCP:
+chain**, connected to two shared systems:
 
-- **Obsidian** (mcp-obsidian): The team's shared LLM-wiki — knowledge graph,
-  specs, runbooks, and accumulated research. Read it before starting work on
-  a topic. Write findings back so other agents and humans can build on them.
+- **Vault** (plain Markdown + git, at `$HERMES_VAULT_PATH`): The team's shared
+  LLM-wiki — knowledge graph, specs, runbooks, and accumulated research. Read
+  with standard file tools (`grep -r`, `cat`, `Read`). Write with `Write`/`Edit`
+  and commit with `git` so changes are versioned and reviewable. **No MCP layer**
+  — the vault is just files in a repo.
 - **Lattice** (mcp-lattice): The team's event-sourced task tracker — every
   research run must be tracked as a Lattice task with round-by-round progress
   comments. This is the audit trail and coordination layer.
@@ -77,23 +72,25 @@ chain**, connected to two shared systems via MCP:
 ## Operational Context
 
 Before starting any research:
-1. **Search Obsidian** for existing work on the topic (`mcp_obsidian_obsidian_simple_search`)
-2. **Read relevant notes** to avoid duplicating effort
+1. **Search the vault** for existing work — `grep -r "<topic>" $HERMES_VAULT_PATH`
+2. **Read relevant notes directly** with `Read` / `cat` to avoid duplicating effort
 3. **Create a Lattice task** for tracking (`mcp_lattice_lattice_create`)
-4. After completion, **write findings to Obsidian** and **close the Lattice task**
+4. After completion, **write findings into the vault**, **commit with git**,
+   and **close the Lattice task**
 
 After research completes:
-1. Write a summary note to Obsidian (e.g., `Research/<topic>.md`)
-2. Link the note in the Lattice task comment
-3. Close the Lattice task with `complete` (not `status`):
+1. Write a summary note to `$HERMES_VAULT_PATH/Research/<topic>.md`
+2. `cd $HERMES_VAULT_PATH && git add Research/<topic>.md && git commit -m "research: <topic>"`
+3. Link the note path in the Lattice task comment
+4. Close the Lattice task with `complete` (not `status`):
    ```
    lattice complete <task_id> --actor agent:researcher --review "<summary>"
    ```
 
-**Degraded mode**: If MCP servers are not connected, declare degraded mode:
-- State: "MCP offline — running without Obsidian/Lattice integration"
+**Degraded mode**: If Lattice MCP is unavailable, declare degraded mode:
+- State: "Lattice offline — running without coordination integration"
 - Continue research if the core task is still possible
-- Do NOT claim full audit trail compliance when MCP is unavailable
+- Vault read/write still works — it's just files
 - Retry MCP connection before the next research run
 
 ## Core Behavior
@@ -192,24 +189,33 @@ Each `run_research` call creates a subdirectory named by run_id:
   - round-*/attempt.py or attempt.md  — actual deliverable per round
   - round-*/results.json  — structured metrics
 
-## Obsidian integration (MCP)
+## Vault integration (plain Markdown + git, no MCP)
 
-Obsidian is the shared knowledge graph. Use it for:
+The vault at `$HERMES_VAULT_PATH` is just a git repo of Markdown files.
+Interact with standard tools — no abstraction layer.
 
 - **Pre-flight**: Search for existing research before starting
   ```
-  mcp_obsidian_obsidian_simple_search("fibonacci optimization")
+  grep -ri "fibonacci optimization" $HERMES_VAULT_PATH
   ```
 - **During**: Read specs, runbooks, or prior research notes
   ```
-  mcp_obsidian_obsidian_get_file_contents("Research/Fibonacci Optimization.md")
+  cat $HERMES_VAULT_PATH/Research/Fibonacci\ Optimization.md
   ```
-- **Post-flight**: Write findings back to the wiki
+- **Post-flight**: Write findings back and commit
   ```
-  mcp_obsidian_obsidian_append_content("Research/Fibonacci Optimization.md", "## Results\n...")
+  cat >> $HERMES_VAULT_PATH/Research/Fibonacci\ Optimization.md <<'EOF'
+
+  ## Results
+  ...
+  EOF
+  cd $HERMES_VAULT_PATH && git add -A && git commit -m "research: fibonacci optimization results"
   ```
+- **History**: Use `git log` / `git blame` to trace who wrote what, when, and why.
 
 **Naming convention**: `Research/<Topic>.md` for research outputs.
+**Why no MCP**: the vault is plain Markdown; standard text + git tools are
+simpler, more debuggable, and let any agent (not just Hermes) interact with it.
 
 ## Lattice integration (MCP)
 
