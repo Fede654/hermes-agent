@@ -38,40 +38,15 @@ def _write_state(job_dir: Path, **fields: Any) -> None:
 
 
 def _build_agent(spec: dict[str, Any]) -> Any:
-    """Build an AIAgent from the job spec."""
-    from run_agent import AIAgent
+    """Build an AIAgent from the job spec.
 
-    agent = AIAgent(
-        model=spec["model"],
-        provider=spec.get("provider"),
-        base_url=spec.get("base_url"),
-        api_key=spec.get("api_key"),
-        api_mode=spec.get("api_mode"),
-        enabled_toolsets=spec.get("toolsets", ["research", "terminal", "file"]),
-        quiet_mode=True,
-        platform="cli",
-        session_id=f"research-job:{spec['job_id']}",
-        # Detached research jobs run under a curated profile (typically the
-        # researcher scaffold). Inherit SOUL.md/MEMORY.md so the parent agent
-        # gets the same context an interactive `researcher chat` would.
-        # The job spec may override via "skip_context_files"/"skip_memory" keys.
-        skip_context_files=spec.get("skip_context_files", False),
-        skip_memory=spec.get("skip_memory", False),
-    )
-
-    # Patch attributes that delegate_task expects
-    agent._delegate_depth = 0
-    agent.terminal_cwd = os.getcwd()
-    agent.cwd = os.getcwd()
-    agent._subdirectory_hints = None
-    agent._delegate_spinner = None
-    agent.tool_progress_callback = lambda *a, **k: None
-    agent.providers_allowed = getattr(agent, "providers_allowed", None)
-    agent.providers_ignored = getattr(agent, "providers_ignored", None)
-    agent.providers_order = getattr(agent, "providers_order", None)
-    agent.provider_sort = getattr(agent, "provider_sort", None)
-
-    return agent
+    Thin wrapper around ``agent.factory.build_agent_for_research_job`` —
+    construction + post-init patching live there so other detached
+    entrypoints can reuse the same logic. See agent/factory.py for the
+    "keep in sync with AIAgent" caveat.
+    """
+    from agent.factory import build_agent_for_research_job
+    return build_agent_for_research_job(spec)
 
 
 def main(spec_path: str) -> int:
