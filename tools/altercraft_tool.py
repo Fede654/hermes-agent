@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import time
+import builtins
 from typing import Any, Optional
 
 import httpx
@@ -94,6 +95,51 @@ def _fmt_json(obj: Any, max_chars: int = 4000) -> str:
     return s
 
 
+def _safe_int(val, default, max=None):
+    """Coerce to int; return default for dict/list/None, error string for unparseable scalars."""
+    if isinstance(val, (dict, list, type(None))):
+        logger.debug("_safe_int received %s: %r", type(val).__name__, val)
+        return default
+    try:
+        result = int(val)
+    except (TypeError, ValueError):
+        return f"Error: must be a number, got {val!r}"
+    if max is not None:
+        result = builtins.max(0, builtins.min(result, max))
+    return result
+
+
+def _safe_float(val, default):
+    """Coerce to float; return default for dict/list/None, error string for unparseable scalars."""
+    if isinstance(val, (dict, list, type(None))):
+        logger.debug("_safe_float received %s: %r", type(val).__name__, val)
+        return default
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return f"Error: must be a number, got {val!r}"
+
+
+def _safe_bool(val, default):
+    """Coerce to bool; return default for dict/list/None.
+    Treats 'true'/'1'/'yes' as True, 'false'/'0'/'no' as False.
+    """
+    if isinstance(val, (dict, list, type(None))):
+        logger.debug("_safe_bool received %s: %r", type(val).__name__, val)
+        return default
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        low = val.lower().strip()
+        if low in ("true", "1", "yes"):
+            return True
+        if low in ("false", "0", "no"):
+            return False
+    if isinstance(val, (int, float)):
+        return bool(val)
+    return default
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # Tool handlers
 # ────────────────────────────────────────────────────────────────────────────
@@ -111,7 +157,9 @@ def _h_status(args, **_: Any) -> str:
 
 def _h_look(args, **_: Any) -> str:
     # server.js takes `range`, not `radius`.
-    rng = int((args or {}).get("radius", (args or {}).get("range", 16)))
+    rng = _safe_int((args or {}).get("radius", (args or {}).get("range", 16)), 16)
+    if isinstance(rng, str):
+        return rng
     ok, body = _req("GET", "/scene", params={"range": rng})
     if not ok:
         ok2, body2 = _req("GET", "/nearby", params={"range": rng})
@@ -162,9 +210,16 @@ def _h_whisper(args, **_: Any) -> str:
 
 def _h_listen(args, **_: Any) -> str:
     a = args or {}
-    qs: dict[str, Any] = {"limit": int(a.get("limit", 20))}
-    if a.get("since_ms") is not None:
-        qs["since"] = int(a["since_ms"])
+    limit = _safe_int(a.get("limit", 20), 20)
+    if isinstance(limit, str):
+        return limit
+    qs: dict[str, Any] = {"limit": limit}
+    since_ms = a.get("since_ms")
+    if since_ms is not None:
+        since = _safe_int(since_ms, 20)
+        if isinstance(since, str):
+            return since
+        qs["since"] = since
     ok, body = _req("GET", "/chat", params=qs)
     if not ok:
         return body
@@ -179,7 +234,7 @@ def _h_listen(args, **_: Any) -> str:
 
 def _h_goto(args, **_: Any) -> str:
     a = args or {}
-    near = bool(a.get("near", False))
+    near = _safe_bool(a.get("near", False), False)
     try:
         x, y, z = float(a["x"]), float(a["y"]), float(a["z"])
     except (KeyError, TypeError, ValueError) as e:
@@ -742,7 +797,10 @@ def _h_collect(args, **_: Any) -> str:
     block = (a.get("block") or "").strip()
     if not block:
         return "Error: block name is required"
-    count = max(1, min(int(a.get("count", 1)), 20))
+    count = _safe_int(a.get("count", 1), 1, max=20)
+    if isinstance(count, str):
+        return count
+    count = max(1, count)
     ok, body = _req("POST", "/action/collect", json={"block": block, "count": count})
     if not ok:
         return body
@@ -776,8 +834,14 @@ def _h_find_blocks(args, **_: Any) -> str:
     block = (a.get("block") or "").strip()
     if not block:
         return "Error: block name is required"
-    radius = max(8, min(int(a.get("radius", 32)), 64))
-    count = max(1, min(int(a.get("count", 10)), 50))
+    radius = _safe_int(a.get("radius", 32), 32, max=64)
+    if isinstance(radius, str):
+        return radius
+    radius = max(8, radius)
+    count = _safe_int(a.get("count", 10), 10, max=50)
+    if isinstance(count, str):
+        return count
+    count = max(1, count)
     ok, body = _req("POST", "/action/find_blocks", json={"block": block, "radius": radius, "count": count})
     if not ok:
         return body
@@ -807,7 +871,10 @@ def _h_smelt_raw(args, **_: Any) -> str:
             f"Error: '{item}' is not in the smelt map. "
             f"Supported: {', '.join(sorted(mapping.keys()))}"
         )
-    count = max(1, int(a.get("count", 1)))
+    count = _safe_int(a.get("count", 1), 1)
+    if isinstance(count, str):
+        return count
+    count = max(1, count)
     fuel = (a.get("fuel") or "").strip() or None
     ok, body = _req("POST", "/action/smelt", json={"input": item, "fuel": fuel, "count": count})
     if not ok:
@@ -861,10 +928,13 @@ def _h_sort_inventory(args, **_: Any) -> str:
 def _h_dump_excess(args, **_: Any) -> str:
     a = args or {}
     keep = set((a.get("keep") or []) if isinstance(a.get("keep"), list) else [a.get("keep")] if a.get("keep") else [])
-    keep_tools = bool(a.get("keep_tools", True))
-    keep_food = bool(a.get("keep_food", True))
+    keep_tools = _safe_bool(a.get("keep_tools", True), True)
+    keep_food = _safe_bool(a.get("keep_food", True), True)
     drop_list = [s.strip() for s in (a.get("drop_list") or []) if isinstance(a.get("drop_list"), list)]
-    max_keep = max(0, int(a.get("max_keep", 64)))
+    max_keep = _safe_int(a.get("max_keep", 64), 64)
+    if isinstance(max_keep, str):
+        return max_keep
+    max_keep = max(0, max_keep)
 
     ok, body = _req("GET", "/inventory")
     if not ok:
@@ -1510,7 +1580,9 @@ registry.register(
 
 def _h_map(args, **_: Any) -> str:
     a = args or {}
-    radius = int(a.get("radius", 16))
+    radius = _safe_int(a.get("radius", 16), 16)
+    if isinstance(radius, str):
+        return radius
     ok, body = _req("GET", "/map", params={"radius": radius})
     if not ok:
         return body
@@ -1519,7 +1591,9 @@ def _h_map(args, **_: Any) -> str:
 
 def _h_scene(args, **_: Any) -> str:
     a = args or {}
-    rng = int(a.get("radius", a.get("range", 16)))
+    rng = _safe_int(a.get("radius", a.get("range", 16)), 16)
+    if isinstance(rng, str):
+        return rng
     ok, body = _req("GET", "/scene", params={"range": rng})
     if not ok:
         return body
@@ -1538,7 +1612,9 @@ def _h_social(args, **_: Any) -> str:
 
 def _h_overhear(args, **_: Any) -> str:
     a = args or {}
-    limit = int(a.get("limit", 20))
+    limit = _safe_int(a.get("limit", 20), 20)
+    if isinstance(limit, str):
+        return limit
     ok, body = _req("GET", "/overhear", params={"count": limit})
     if not ok:
         return body
@@ -1978,7 +2054,9 @@ def _assert_near_block(
 def _h_craft(args, **_: Any) -> str:
     a = args or {}
     item = (a.get("item") or "").strip()
-    count = int(a.get("count", 1))
+    count = _safe_int(a.get("count", 1), 1)
+    if isinstance(count, str):
+        return count
     if not item:
         return "Error: item is required"
     if count < 1:
@@ -2005,7 +2083,9 @@ def _h_smelt(args, **_: Any) -> str:
     a = args or {}
     inp = (a.get("input") or "").strip()
     fuel = (a.get("fuel") or "").strip()
-    count = int(a.get("count", 1))
+    count = _safe_int(a.get("count", 1), 1)
+    if isinstance(count, str):
+        return count
     x = a.get("x")
     y = a.get("y")
     z = a.get("z")
@@ -2031,7 +2111,9 @@ def _h_smelt_start(args, **_: Any) -> str:
     a = args or {}
     inp = (a.get("input") or "").strip()
     fuel = (a.get("fuel") or "").strip()
-    count = int(a.get("count", 1))
+    count = _safe_int(a.get("count", 1), 1)
+    if isinstance(count, str):
+        return count
     x = a.get("x")
     y = a.get("y")
     z = a.get("z")
@@ -2323,7 +2405,10 @@ def _h_flee(args, **_: Any) -> str:
     a = args or {}
     payload: dict[str, Any] = {}
     if "distance" in a:
-        payload["distance"] = float(a["distance"])
+        distance = _safe_float(a["distance"], 0.0)
+        if isinstance(distance, str):
+            return distance
+        payload["distance"] = distance
     if "from" in a:
         payload["from"] = str(a["from"])
     ok, body = _req("POST", "/action/flee", json=payload)
@@ -2362,7 +2447,7 @@ def _h_shoot(args, **_: Any) -> str:
         return "Error: shoot requires a target."
     payload: dict[str, Any] = {"target": target}
     if "predict" in a:
-        payload["predict"] = bool(a["predict"])
+        payload["predict"] = _safe_bool(a["predict"], False)
     ok, body = _req("POST", "/action/shoot", json=payload)
     if not ok:
         return body
