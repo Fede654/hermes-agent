@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from typing import Any, Optional
 
 import httpx
@@ -51,13 +52,29 @@ def _check_server_available() -> bool:
 def _req(method: str, path: str, **kwargs: Any) -> tuple[bool, Any]:
     """Low-level request helper. Returns (ok, body_or_error_message)."""
     url = f"{_api_base()}{path}"
-    try:
-        with httpx.Client(timeout=_timeout()) as client:
-            r = client.request(method, url, **kwargs)
-    except httpx.TimeoutException:
-        return False, f"Error: timeout after {_timeout()}s on {method} {path}"
-    except httpx.HTTPError as e:
-        return False, f"Error: {type(e).__name__} on {method} {path}: {e}"
+    last_exc = None
+    for attempt in range(2):
+        try:
+            with httpx.Client(timeout=_timeout()) as client:
+                r = client.request(method, url, **kwargs)
+            break  # success, exit retry loop
+        except httpx.TimeoutException:
+            last_exc = f"Error: timeout after {_timeout()}s on {method} {path}"
+            if attempt == 0:
+                time.sleep(1.0)
+                continue
+            return False, last_exc
+        except (httpx.ConnectError, httpx.NetworkError) as e:
+            last_exc = f"Error: {type(e).__name__} on {method} {path}: {e}"
+            if attempt == 0:
+                time.sleep(1.0)
+                continue
+            return False, last_exc
+        except httpx.HTTPError as e:
+            return False, f"Error: {type(e).__name__} on {method} {path}: {e}"
+    else:
+        # loop exhausted without break
+        return False, last_exc or f"Error: failed after retries on {method} {path}"
     if r.status_code >= 400:
         try:
             detail = r.json()
