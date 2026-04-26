@@ -73,7 +73,7 @@ class SpatialLedger:
 
     def __init__(self, backing_file: Optional[Path] = None) -> None:
         self._table: dict[tuple[int, int, int], tuple[str, float]] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._file = backing_file
 
     def _now(self) -> float:
