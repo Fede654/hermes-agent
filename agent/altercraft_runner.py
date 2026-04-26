@@ -332,8 +332,38 @@ class ReactiveLoop:
         try:
             reply = self.agent.chat(user_msg)
             logger.info("agent turn complete: %r", (reply or "")[:200])
-        except Exception as e:
-            logger.exception("agent turn crashed: %s", e)
+        except Exception as exc:
+            logger.exception("agent turn crashed: %s", exc)
+            err_msg = (
+                f"⚠️ Sorry, my agent loop crashed: {type(exc).__name__}. "
+                "Operator was notified."
+            )
+            try:
+                with httpx.Client(timeout=5.0) as c:
+                    r = c.post(
+                        f"{self.api_url}/action/chat",
+                        json={"message": err_msg},
+                    )
+                if r.status_code >= 400:
+                    logger.error("fallback /action/chat failed: HTTP %s", r.status_code)
+            except Exception as http_exc:
+                logger.error("fallback /action/chat failed: %s", http_exc)
+            # Best-effort profile-level error marker
+            try:
+                profile_dir = self.session_dir.parents[1]
+                with open(profile_dir / "events.jsonl", "a", buffering=1) as fh:
+                    fh.write(
+                        json.dumps(
+                            {
+                                "ts": time.time(),
+                                "exc_type": type(exc).__name__,
+                                "exc_str": str(exc),
+                            }
+                        )
+                        + "\n"
+                    )
+            except Exception:
+                pass
             return
         self.last_response_ts = time.monotonic()
 
