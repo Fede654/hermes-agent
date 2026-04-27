@@ -33,6 +33,13 @@ def _api_base() -> str:
     return os.environ.get("MC_API_URL", "http://localhost:3001").rstrip("/")
 
 
+def _resolve_api_url(args: dict) -> str:
+    url = (args or {}).get("api_url")
+    if url and isinstance(url, str) and url.startswith("http"):
+        return url.rstrip("/")
+    return _api_base()
+
+
 def _timeout() -> float:
     try:
         return float(os.environ.get("MC_TOOL_TIMEOUT", "30"))
@@ -50,9 +57,10 @@ def _check_server_available() -> bool:
         return False
 
 
-def _req(method: str, path: str, **kwargs: Any) -> tuple[bool, Any]:
+def _req(method: str, path: str, *, api_url=None, **kwargs: Any) -> tuple[bool, Any]:
     """Low-level request helper. Returns (ok, body_or_error_message)."""
-    url = f"{_api_base()}{path}"
+    base = api_url.rstrip("/") if api_url else _api_base()
+    url = f"{base}{path}"
     last_exc = None
     for attempt in range(2):
         try:
@@ -149,20 +157,22 @@ def _safe_bool(val, default):
 # arguments) plus absorbs any extra kwargs the registry may pass.
 
 def _h_status(args, **_: Any) -> str:
-    ok, body = _req("GET", "/status")
+    api_url = _resolve_api_url(args)
+    ok, body = _req("GET", "/status", api_url=api_url)
     if not ok:
         return body
     return "Status:\n" + _fmt_json(body)
 
 
 def _h_look(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     # server.js takes `range`, not `radius`.
     rng = _safe_int((args or {}).get("radius", (args or {}).get("range", 16)), 16)
     if isinstance(rng, str):
         return rng
-    ok, body = _req("GET", "/scene", params={"range": rng})
+    ok, body = _req("GET", "/scene", params={"range": rng}, api_url=api_url)
     if not ok:
-        ok2, body2 = _req("GET", "/nearby", params={"range": rng})
+        ok2, body2 = _req("GET", "/nearby", params={"range": rng}, api_url=api_url)
         if ok2:
             return "Nearby (fallback):\n" + _fmt_json(body2)
         return body
@@ -173,26 +183,29 @@ def _h_look(args, **_: Any) -> str:
 
 
 def _h_inventory(args, **_: Any) -> str:
-    ok, body = _req("GET", "/inventory")
+    api_url = _resolve_api_url(args)
+    ok, body = _req("GET", "/inventory", api_url=api_url)
     if not ok:
         return body
     return "Inventory:\n" + _fmt_json(body)
 
 
 def _h_say(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     # Accept common aliases in case the model picks a different arg name.
     message = (a.get("message") or a.get("text") or a.get("content")
                or a.get("msg") or "").strip()
     if not message:
         return f"Error: empty message; got args={list(a.keys())}"
-    ok, body = _req("POST", "/action/chat", json={"message": message})
+    ok, body = _req("POST", "/action/chat", json={"message": message}, api_url=api_url)
     if not ok:
         return body
     return f'Said: "{message}"'
 
 
 def _h_whisper(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     target = (a.get("target") or a.get("to") or a.get("recipient")
               or a.get("username") or a.get("player") or "").strip()
@@ -202,13 +215,14 @@ def _h_whisper(args, **_: Any) -> str:
         return (f"Error: target and message are required; "
                 f"got args={list(a.keys())}")
     ok, body = _req("POST", "/action/chat_to",
-                    json={"player": target, "message": message})
+                    json={"player": target, "message": message}, api_url=api_url)
     if not ok:
         return body
     return f'Whispered to {target}: "{message}"'
 
 
 def _h_listen(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     limit = _safe_int(a.get("limit", 20), 20)
     if isinstance(limit, str):
@@ -220,7 +234,7 @@ def _h_listen(args, **_: Any) -> str:
         if isinstance(since, str):
             return since
         qs["since"] = since
-    ok, body = _req("GET", "/chat", params=qs)
+    ok, body = _req("GET", "/chat", params=qs, api_url=api_url)
     if not ok:
         return body
     events = body
@@ -233,6 +247,7 @@ def _h_listen(args, **_: Any) -> str:
 
 
 def _h_goto(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     near = _safe_bool(a.get("near", False), False)
     try:
@@ -240,16 +255,17 @@ def _h_goto(args, **_: Any) -> str:
     except (KeyError, TypeError, ValueError) as e:
         return f"Error: goto needs x,y,z numbers ({e})"
     endpoint = "/action/goto_near" if near else "/task/goto"
-    ok, body = _req("POST", endpoint, json={"x": x, "y": y, "z": z})
+    ok, body = _req("POST", endpoint, json={"x": x, "y": y, "z": z}, api_url=api_url)
     if not ok:
         return body
     return f"Goto{' near' if near else ''} ({x}, {y}, {z}) started:\n" + _fmt_json(body)
 
 
 def _h_stop(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     # Cancel any running task; also stop synchronous actions.
-    _req("POST", "/task/cancel")
-    ok, body = _req("POST", "/action/stop", json={})
+    _req("POST", "/task/cancel", api_url=api_url)
+    ok, body = _req("POST", "/action/stop", json={}, api_url=api_url)
     if not ok:
         return body
     return "Stopped current task."
@@ -268,7 +284,12 @@ ALTERCRAFT_STATUS_SCHEMA = {
             "health, hunger, dimension, current task. Use it to ground "
             "yourself before acting."
         ),
-        "parameters": {"type": "object", "properties": {}, "required": []},
+        "parameters": {"type": "object", "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
+            }, "required": []},
     },
 }
 
@@ -285,6 +306,10 @@ ALTERCRAFT_LOOK_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "radius": {
                     "type": "integer",
                     "description": "Perception radius in blocks (default 16).",
@@ -301,7 +326,12 @@ ALTERCRAFT_INVENTORY_SCHEMA = {
     "function": {
         "name": "altercraft_inventory",
         "description": "List the items currently in this agent's inventory.",
-        "parameters": {"type": "object", "properties": {}, "required": []},
+        "parameters": {"type": "object", "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
+            }, "required": []},
     },
 }
 
@@ -316,6 +346,10 @@ ALTERCRAFT_SAY_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "message": {
                     "type": "string",
                     "description": "The message text. No prefixes or self-references; just what you'd actually say.",
@@ -337,6 +371,10 @@ ALTERCRAFT_WHISPER_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "target": {"type": "string", "description": "Recipient username."},
                 "message": {"type": "string", "description": "Message text."},
             },
@@ -357,6 +395,10 @@ ALTERCRAFT_LISTEN_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "since_ms": {
                     "type": "integer",
                     "description": "Return events with timestamp >= this (ms since epoch). Omit to use the server default window.",
@@ -385,6 +427,10 @@ ALTERCRAFT_GOTO_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "x": {"type": "number"},
                 "y": {"type": "number"},
                 "z": {"type": "number"},
@@ -400,7 +446,12 @@ ALTERCRAFT_STOP_SCHEMA = {
     "function": {
         "name": "altercraft_stop",
         "description": "Cancel the current movement/task. Use if stuck or interrupted.",
-        "parameters": {"type": "object", "properties": {}, "required": []},
+        "parameters": {"type": "object", "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
+            }, "required": []},
     },
 }
 
@@ -501,36 +552,40 @@ registry.register(
 # ==================================================================
 
 def _h_follow(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     player = (a.get("player") or a.get("target") or "").strip()
     if not player:
         return "Error: follow requires a player name"
-    ok, body = _req("POST", "/task/follow", json={"player": player})
+    ok, body = _req("POST", "/task/follow", json={"player": player}, api_url=api_url)
     if not ok:
         return body
     return f"Following {player}:\n" + _fmt_json(body)
 
 
 def _h_look_at(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     try:
         x, y, z = float(a["x"]), float(a["y"]), float(a["z"])
     except (KeyError, TypeError, ValueError) as e:
         return f"Error: look_at needs x,y,z numbers ({e})"
-    ok, body = _req("POST", "/action/look", json={"x": x, "y": y, "z": z})
+    ok, body = _req("POST", "/action/look", json={"x": x, "y": y, "z": z}, api_url=api_url)
     if not ok:
         return body
     return f"Looking at ({x}, {y}, {z}):\n" + _fmt_json(body)
 
 
 def _h_deathpoint(args, **_: Any) -> str:
-    ok, body = _req("POST", "/task/deathpoint")
+    api_url = _resolve_api_url(args)
+    ok, body = _req("POST", "/task/deathpoint", api_url=api_url)
     if not ok:
         return body
     return "Deathpoint recovery:\n" + _fmt_json(body)
 
 
 def _h_mark(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     name = (a.get("name") or "").strip()
     if not name:
@@ -539,36 +594,39 @@ def _h_mark(args, **_: Any) -> str:
     payload: dict[str, Any] = {"name": name}
     if note:
         payload["note"] = note
-    ok, body = _req("POST", "/action/mark", json=payload)
+    ok, body = _req("POST", "/action/mark", json=payload, api_url=api_url)
     if not ok:
         return body
     return f"Marked '{name}':\n" + _fmt_json(body)
 
 
 def _h_marks(args, **_: Any) -> str:
-    ok, body = _req("POST", "/action/marks")
+    api_url = _resolve_api_url(args)
+    ok, body = _req("POST", "/action/marks", api_url=api_url)
     if not ok:
         return body
     return "Saved marks:\n" + _fmt_json(body)
 
 
 def _h_go_mark(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     name = (a.get("name") or "").strip()
     if not name:
         return "Error: go_mark requires a mark name"
-    ok, body = _req("POST", "/task/go_mark", json={"name": name})
+    ok, body = _req("POST", "/task/go_mark", json={"name": name}, api_url=api_url)
     if not ok:
         return body
     return f"Going to mark '{name}':\n" + _fmt_json(body)
 
 
 def _h_unmark(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     name = (a.get("name") or "").strip()
     if not name:
         return "Error: unmark requires a mark name"
-    ok, body = _req("POST", "/action/unmark", json={"name": name})
+    ok, body = _req("POST", "/action/unmark", json={"name": name}, api_url=api_url)
     if not ok:
         return body
     return f"Removed mark '{name}':\n" + _fmt_json(body)
@@ -584,6 +642,10 @@ ALTERCRAFT_FOLLOW_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "player": {"type": "string", "description": "Username of the player to follow."},
             },
             "required": ["player"],
@@ -599,6 +661,10 @@ ALTERCRAFT_LOOK_AT_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "x": {"type": "number"},
                 "y": {"type": "number"},
                 "z": {"type": "number"},
@@ -613,7 +679,12 @@ ALTERCRAFT_DEATHPOINT_SCHEMA = {
     "function": {
         "name": "altercraft_deathpoint",
         "description": "Pathfind to your last death location to recover dropped items.",
-        "parameters": {"type": "object", "properties": {}, "required": []},
+        "parameters": {"type": "object", "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
+            }, "required": []},
     },
 }
 
@@ -625,6 +696,10 @@ ALTERCRAFT_MARK_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "name": {"type": "string", "description": "Unique name for this mark (e.g. 'home', 'mine_entrance')."},
                 "note": {"type": "string", "description": "Optional note about this location."},
             },
@@ -638,7 +713,12 @@ ALTERCRAFT_MARKS_SCHEMA = {
     "function": {
         "name": "altercraft_marks",
         "description": "List all saved waypoints with coordinates and notes.",
-        "parameters": {"type": "object", "properties": {}, "required": []},
+        "parameters": {"type": "object", "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
+            }, "required": []},
     },
 }
 
@@ -650,6 +730,10 @@ ALTERCRAFT_GO_MARK_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "name": {"type": "string", "description": "Name of the saved waypoint."},
             },
             "required": ["name"],
@@ -665,6 +749,10 @@ ALTERCRAFT_UNMARK_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "name": {"type": "string", "description": "Name of the waypoint to delete."},
             },
             "required": ["name"],
@@ -793,6 +881,7 @@ def _smelt_map() -> dict[str, str]:
 # ────────────────────────────────────────────────────────────────────────────
 
 def _h_collect(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     block = (a.get("block") or "").strip()
     if not block:
@@ -801,7 +890,7 @@ def _h_collect(args, **_: Any) -> str:
     if isinstance(count, str):
         return count
     count = max(1, count)
-    ok, body = _req("POST", "/action/collect", json={"block": block, "count": count})
+    ok, body = _req("POST", "/action/collect", json={"block": block, "count": count}, api_url=api_url)
     if not ok:
         return body
     result = body.get("result") or body.get("data", {}).get("result", "")
@@ -809,12 +898,13 @@ def _h_collect(args, **_: Any) -> str:
 
 
 def _h_dig(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     try:
         x, y, z = float(a["x"]), float(a["y"]), float(a["z"])
     except (KeyError, TypeError, ValueError) as e:
         return f"Error: dig needs x,y,z numbers ({e})"
-    ok, body = _req("POST", "/action/dig", json={"x": x, "y": y, "z": z})
+    ok, body = _req("POST", "/action/dig", json={"x": x, "y": y, "z": z}, api_url=api_url)
     if not ok:
         return body
     result = body.get("result") or body.get("data", {}).get("result", "")
@@ -822,7 +912,8 @@ def _h_dig(args, **_: Any) -> str:
 
 
 def _h_pickup(args, **_: Any) -> str:
-    ok, body = _req("POST", "/action/pickup", json={})
+    api_url = _resolve_api_url(args)
+    ok, body = _req("POST", "/action/pickup", json={}, api_url=api_url)
     if not ok:
         return body
     result = body.get("result") or body.get("data", {}).get("result", "")
@@ -830,6 +921,7 @@ def _h_pickup(args, **_: Any) -> str:
 
 
 def _h_find_blocks(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     block = (a.get("block") or "").strip()
     if not block:
@@ -842,7 +934,7 @@ def _h_find_blocks(args, **_: Any) -> str:
     if isinstance(count, str):
         return count
     count = max(1, count)
-    ok, body = _req("POST", "/action/find_blocks", json={"block": block, "radius": radius, "count": count})
+    ok, body = _req("POST", "/action/find_blocks", json={"block": block, "radius": radius, "count": count}, api_url=api_url)
     if not ok:
         return body
     payload = body.get("data", body) if isinstance(body, dict) else body
@@ -861,6 +953,7 @@ def _h_find_blocks(args, **_: Any) -> str:
 
 
 def _h_smelt_raw(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     item = (a.get("item") or "").strip()
     if not item:
@@ -876,7 +969,7 @@ def _h_smelt_raw(args, **_: Any) -> str:
         return count
     count = max(1, count)
     fuel = (a.get("fuel") or "").strip() or None
-    ok, body = _req("POST", "/action/smelt", json={"input": item, "fuel": fuel, "count": count})
+    ok, body = _req("POST", "/action/smelt", json={"input": item, "fuel": fuel, "count": count}, api_url=api_url)
     if not ok:
         return body
     result = body.get("result") or body.get("data", {}).get("result", "")
@@ -884,7 +977,8 @@ def _h_smelt_raw(args, **_: Any) -> str:
 
 
 def _h_sort_inventory(args, **_: Any) -> str:
-    ok, body = _req("GET", "/inventory")
+    api_url = _resolve_api_url(args)
+    ok, body = _req("GET", "/inventory", api_url=api_url)
     if not ok:
         return body
     payload = body.get("data", body) if isinstance(body, dict) else body
@@ -926,6 +1020,7 @@ def _h_sort_inventory(args, **_: Any) -> str:
 
 
 def _h_dump_excess(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     keep = set((a.get("keep") or []) if isinstance(a.get("keep"), list) else [a.get("keep")] if a.get("keep") else [])
     keep_tools = _safe_bool(a.get("keep_tools", True), True)
@@ -936,7 +1031,7 @@ def _h_dump_excess(args, **_: Any) -> str:
         return max_keep
     max_keep = max(0, max_keep)
 
-    ok, body = _req("GET", "/inventory")
+    ok, body = _req("GET", "/inventory", api_url=api_url)
     if not ok:
         return body
     payload = body.get("data", body) if isinstance(body, dict) else body
@@ -975,7 +1070,7 @@ def _h_dump_excess(args, **_: Any) -> str:
     dropped = []
     failed = []
     for cand in candidates:
-        ok2, _ = _req("POST", "/action/toss", json={"item": cand["name"], "count": cand["count"]})
+        ok2, _ = _req("POST", "/action/toss", json={"item": cand["name"], "count": cand["count"]}, api_url=api_url)
         if ok2:
             dropped.append(f"{cand['name']} x{cand['count']}")
         else:
@@ -1011,6 +1106,10 @@ ALTERCRAFT_COLLECT_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "block": {
                     "type": "string",
                     "description": "Minecraft block name, e.g. oak_log, iron_ore, cobblestone.",
@@ -1038,6 +1137,10 @@ ALTERCRAFT_DIG_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "x": {"type": "number"},
                 "y": {"type": "number"},
                 "z": {"type": "number"},
@@ -1055,7 +1158,12 @@ ALTERCRAFT_PICKUP_SCHEMA = {
             "Collect nearby dropped items on the ground. The bot will pathfind to each drop "
             "within ~16 blocks and walk over it. Call after mining or fighting."
         ),
-        "parameters": {"type": "object", "properties": {}, "required": []},
+        "parameters": {"type": "object", "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
+            }, "required": []},
     },
 }
 
@@ -1071,6 +1179,10 @@ ALTERCRAFT_FIND_BLOCKS_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "block": {
                     "type": "string",
                     "description": "Block name to search for, e.g. diamond_ore.",
@@ -1104,6 +1216,10 @@ ALTERCRAFT_SMELT_RAW_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "item": {
                     "type": "string",
                     "description": "Input item name, e.g. raw_iron.",
@@ -1132,7 +1248,12 @@ ALTERCRAFT_SORT_INVENTORY_SCHEMA = {
             "combat, misc). This is a report-only sort; actual slot reordering requires a future "
             "server update. Use it after mining to audit what you collected."
         ),
-        "parameters": {"type": "object", "properties": {}, "required": []},
+        "parameters": {"type": "object", "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
+            }, "required": []},
     },
 }
 
@@ -1148,6 +1269,10 @@ ALTERCRAFT_DUMP_EXCESS_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "keep": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -1269,12 +1394,13 @@ def _parse_xyz(args: dict) -> tuple[float, float, float] | str:
 
 
 def _h_list_container(args: Optional[dict], **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     xyz = _parse_xyz(a)
     if isinstance(xyz, str):
         return xyz
     x, y, z = xyz
-    ok, body = _req("POST", "/action/list_container", json={"x": x, "y": y, "z": z})
+    ok, body = _req("POST", "/action/list_container", json={"x": x, "y": y, "z": z}, api_url=api_url)
     if not ok:
         return body
     payload = body.get("data", body) if isinstance(body, dict) else body
@@ -1292,6 +1418,7 @@ def _h_list_container(args: Optional[dict], **_: Any) -> str:
 
 
 def _h_deposit(args: Optional[dict], **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     xyz = _parse_xyz(a)
     if isinstance(xyz, str):
@@ -1304,7 +1431,7 @@ def _h_deposit(args: Optional[dict], **_: Any) -> str:
     payload: dict[str, Any] = {"x": x, "y": y, "z": z, "item": item}
     if count is not None:
         payload["count"] = int(count)
-    ok, body = _req("POST", "/action/deposit", json=payload)
+    ok, body = _req("POST", "/action/deposit", json=payload, api_url=api_url)
     if not ok:
         return body
     data = body.get("data", body) if isinstance(body, dict) else body
@@ -1317,6 +1444,7 @@ def _h_deposit(args: Optional[dict], **_: Any) -> str:
 
 
 def _h_withdraw(args: Optional[dict], **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     xyz = _parse_xyz(a)
     if isinstance(xyz, str):
@@ -1329,7 +1457,7 @@ def _h_withdraw(args: Optional[dict], **_: Any) -> str:
     payload: dict[str, Any] = {"x": x, "y": y, "z": z, "item": item}
     if count is not None:
         payload["count"] = int(count)
-    ok, body = _req("POST", "/action/withdraw", json=payload)
+    ok, body = _req("POST", "/action/withdraw", json=payload, api_url=api_url)
     if not ok:
         return body
     data = body.get("data", body) if isinstance(body, dict) else body
@@ -1342,12 +1470,13 @@ def _h_withdraw(args: Optional[dict], **_: Any) -> str:
 
 
 def _h_furnace_check(args: Optional[dict], **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     xyz = _parse_xyz(a)
     if isinstance(xyz, str):
         return xyz
     x, y, z = xyz
-    ok, body = _req("POST", "/action/furnace_check", json={"x": x, "y": y, "z": z})
+    ok, body = _req("POST", "/action/furnace_check", json={"x": x, "y": y, "z": z}, api_url=api_url)
     if not ok:
         return body
     data = body.get("data", body) if isinstance(body, dict) else body
@@ -1369,6 +1498,7 @@ def _h_furnace_check(args: Optional[dict], **_: Any) -> str:
 
 
 def _h_furnace_take(args: Optional[dict], **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     xyz = _parse_xyz(a)
     if isinstance(xyz, str):
@@ -1378,7 +1508,7 @@ def _h_furnace_take(args: Optional[dict], **_: Any) -> str:
     payload: dict[str, Any] = {"x": x, "y": y, "z": z}
     if count is not None:
         payload["count"] = int(count)
-    ok, body = _req("POST", "/action/furnace_take", json=payload)
+    ok, body = _req("POST", "/action/furnace_take", json=payload, api_url=api_url)
     if not ok:
         return body
     data = body.get("data", body) if isinstance(body, dict) else body
@@ -1405,6 +1535,10 @@ ALTERCRAFT_LIST_CONTAINER_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "x": {"type": "number", "description": "Container X coordinate."},
                 "y": {"type": "number", "description": "Container Y coordinate."},
                 "z": {"type": "number", "description": "Container Z coordinate."},
@@ -1426,6 +1560,10 @@ ALTERCRAFT_DEPOSIT_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "x": {"type": "number"},
                 "y": {"type": "number"},
                 "z": {"type": "number"},
@@ -1455,6 +1593,10 @@ ALTERCRAFT_WITHDRAW_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "x": {"type": "number"},
                 "y": {"type": "number"},
                 "z": {"type": "number"},
@@ -1484,6 +1626,10 @@ ALTERCRAFT_FURNACE_CHECK_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "x": {"type": "number"},
                 "y": {"type": "number"},
                 "z": {"type": "number"},
@@ -1504,6 +1650,10 @@ ALTERCRAFT_FURNACE_TAKE_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "x": {"type": "number"},
                 "y": {"type": "number"},
                 "z": {"type": "number"},
@@ -1579,22 +1729,24 @@ registry.register(
 # ==================================================================
 
 def _h_map(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     radius = _safe_int(a.get("radius", 16), 16)
     if isinstance(radius, str):
         return radius
-    ok, body = _req("GET", "/map", params={"radius": radius})
+    ok, body = _req("GET", "/map", params={"radius": radius}, api_url=api_url)
     if not ok:
         return body
     return f"Map (r={radius}):\n" + _fmt_json(body)
 
 
 def _h_scene(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     rng = _safe_int(a.get("radius", a.get("range", 16)), 16)
     if isinstance(rng, str):
         return rng
-    ok, body = _req("GET", "/scene", params={"range": rng})
+    ok, body = _req("GET", "/scene", params={"range": rng}, api_url=api_url)
     if not ok:
         return body
     payload = body.get("data", body) if isinstance(body, dict) else body
@@ -1604,32 +1756,36 @@ def _h_scene(args, **_: Any) -> str:
 
 
 def _h_social(args, **_: Any) -> str:
-    ok, body = _req("GET", "/social")
+    api_url = _resolve_api_url(args)
+    ok, body = _req("GET", "/social", api_url=api_url)
     if not ok:
         return body
     return "Social graph:\n" + _fmt_json(body)
 
 
 def _h_overhear(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     limit = _safe_int(a.get("limit", 20), 20)
     if isinstance(limit, str):
         return limit
-    ok, body = _req("GET", "/overhear", params={"count": limit})
+    ok, body = _req("GET", "/overhear", params={"count": limit}, api_url=api_url)
     if not ok:
         return body
     return "Overheard:\n" + _fmt_json(body)
 
 
 def _h_sounds(args, **_: Any) -> str:
-    ok, body = _req("GET", "/sounds")
+    api_url = _resolve_api_url(args)
+    ok, body = _req("GET", "/sounds", api_url=api_url)
     if not ok:
         return body
     return "Sounds:\n" + _fmt_json(body)
 
 
 def _h_commands(args, **_: Any) -> str:
-    ok, body = _req("GET", "/commands")
+    api_url = _resolve_api_url(args)
+    ok, body = _req("GET", "/commands", api_url=api_url)
     if not ok:
         return body
     return "Pending commands:\n" + _fmt_json(body)
@@ -1649,6 +1805,10 @@ ALTERCRAFT_MAP_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "radius": {
                     "type": "integer",
                     "description": "Perception radius in blocks. Default 16, max 24.",
@@ -1672,6 +1832,10 @@ ALTERCRAFT_SCENE_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "radius": {
                     "type": "integer",
                     "description": "Perception radius in blocks. Default 16, max 24.",
@@ -1692,7 +1856,12 @@ ALTERCRAFT_SOCIAL_SCHEMA = {
             "commands given/completed, last channel, last message, and last seen timestamps. "
             "Use before responding to unfamiliar players to understand relationship history."
         ),
-        "parameters": {"type": "object", "properties": {}, "required": []},
+        "parameters": {"type": "object", "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
+            }, "required": []},
     },
 }
 
@@ -1708,6 +1877,10 @@ ALTERCRAFT_OVERHEAR_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "limit": {
                     "type": "integer",
                     "description": "Maximum number of overheard messages to return.",
@@ -1727,7 +1900,12 @@ ALTERCRAFT_SOUNDS_SCHEMA = {
             "Retrieve recent entity-caused sound events (mining, sprinting, walking). "
             "Sounds expire after ~30 seconds. Use when you have no current task and want to be proactive."
         ),
-        "parameters": {"type": "object", "properties": {}, "required": []},
+        "parameters": {"type": "object", "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
+            }, "required": []},
     },
 }
 
@@ -1739,7 +1917,12 @@ ALTERCRAFT_COMMANDS_SCHEMA = {
             "Retrieve the pending command queue from other players. "
             "Commands persist until acknowledged. Poll regularly to auto-trigger responses to direct orders."
         ),
-        "parameters": {"type": "object", "properties": {}, "required": []},
+        "parameters": {"type": "object", "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
+            }, "required": []},
     },
 }
 
@@ -1813,6 +1996,7 @@ registry.register(
 # ==================================================================
 
 def _h_place(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     block = (a.get("block") or "").strip()
     try:
@@ -1821,13 +2005,14 @@ def _h_place(args, **_: Any) -> str:
         return f"Error: place needs block name and x,y,z numbers ({e})"
     if not block:
         return "Error: block name is required"
-    ok, body = _req("POST", "/action/place", json={"block": block, "x": x, "y": y, "z": z})
+    ok, body = _req("POST", "/action/place", json={"block": block, "x": x, "y": y, "z": z}, api_url=api_url)
     if not ok:
         return body
     return f"Placed {block} at ({x}, {y}, {z}):\n" + _fmt_json(body)
 
 
 def _h_place_fill(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     block = (a.get("block") or "").strip()
     if not block:
@@ -1846,6 +2031,7 @@ def _h_place_fill(args, **_: Any) -> str:
         build=True,
         json={"block": block, "x1": x1, "y1": y1, "z1": z1,
               "x2": x2, "y2": y2, "z2": z2, "hollow": hollow},
+        api_url=api_url,
     )
     if not ok:
         return body
@@ -1853,19 +2039,21 @@ def _h_place_fill(args, **_: Any) -> str:
 
 
 def _h_interact(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     try:
         x, y, z = float(a["x"]), float(a["y"]), float(a["z"])
     except (KeyError, TypeError, ValueError) as e:
         return f"Error: interact needs x,y,z numbers ({e})"
-    ok, body = _req("POST", "/action/interact", json={"x": x, "y": y, "z": z})
+    ok, body = _req("POST", "/action/interact", json={"x": x, "y": y, "z": z}, api_url=api_url)
     if not ok:
         return body
     return f"Interacted with block at ({x}, {y}, {z}):\n" + _fmt_json(body)
 
 
 def _h_close_screen(args, **_: Any) -> str:
-    ok, body = _req("POST", "/action/close_screen", json={})
+    api_url = _resolve_api_url(args)
+    ok, body = _req("POST", "/action/close_screen", json={}, api_url=api_url)
     if not ok:
         return body
     return "Closed screen.\n" + _fmt_json(body)
@@ -1890,6 +2078,10 @@ ALTERCRAFT_PLACE_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "block": {"type": "string", "description": "Block name, e.g. 'oak_planks' or 'dirt'."},
                 "x": {"type": "number"},
                 "y": {"type": "number"},
@@ -1914,6 +2106,10 @@ ALTERCRAFT_PLACE_FILL_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "block": {"type": "string", "description": "Block name, e.g. 'cobblestone'."},
                 "x1": {"type": "number"},
                 "y1": {"type": "number"},
@@ -1939,6 +2135,10 @@ ALTERCRAFT_INTERACT_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "x": {"type": "number"},
                 "y": {"type": "number"},
                 "z": {"type": "number"},
@@ -1956,7 +2156,12 @@ ALTERCRAFT_CLOSE_SCREEN_SCHEMA = {
             "Close any open GUI (chest, crafting table, villager trade, etc.). "
             "Use after altercraft_interact if a screen opens and blocks further actions."
         ),
-        "parameters": {"type": "object", "properties": {}, "required": []},
+        "parameters": {"type": "object", "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
+            }, "required": []},
     },
 }
 
@@ -2052,6 +2257,7 @@ def _assert_near_block(
 
 
 def _h_craft(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     item = (a.get("item") or "").strip()
     count = _safe_int(a.get("count", 1), 1)
@@ -2061,18 +2267,19 @@ def _h_craft(args, **_: Any) -> str:
         return "Error: item is required"
     if count < 1:
         return "Error: count must be >= 1"
-    ok, body = _req("POST", "/action/craft", json={"item": item, "count": count})
+    ok, body = _req("POST", "/action/craft", json={"item": item, "count": count}, api_url=api_url)
     if not ok:
         return body
     return f"Craft ({item} x{count}):\n" + _fmt_json(body)
 
 
 def _h_recipes(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     item = (a.get("item") or "").strip()
     if not item:
         return "Error: item is required"
-    ok, body = _req("POST", "/action/recipes", json={"item": item})
+    ok, body = _req("POST", "/action/recipes", json={"item": item}, api_url=api_url)
     if not ok:
         return body
     payload = body.get("data", body) if isinstance(body, dict) else body
@@ -2080,6 +2287,7 @@ def _h_recipes(args, **_: Any) -> str:
 
 
 def _h_smelt(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     inp = (a.get("input") or "").strip()
     fuel = (a.get("fuel") or "").strip()
@@ -2101,13 +2309,14 @@ def _h_smelt(args, **_: Any) -> str:
         err = _assert_near_block((payload["x"], payload["y"], payload["z"]), "furnace")
         if err:
             return err
-    ok, body = _req("POST", "/action/smelt", json=payload)
+    ok, body = _req("POST", "/action/smelt", json=payload, api_url=api_url)
     if not ok:
         return body
     return f"Smelt ({inp} x{count} with {fuel}):\n" + _fmt_json(body)
 
 
 def _h_smelt_start(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     inp = (a.get("input") or "").strip()
     fuel = (a.get("fuel") or "").strip()
@@ -2129,7 +2338,7 @@ def _h_smelt_start(args, **_: Any) -> str:
         err = _assert_near_block((payload["x"], payload["y"], payload["z"]), "furnace")
         if err:
             return err
-    ok, body = _req("POST", "/action/smelt_start", json=payload)
+    ok, body = _req("POST", "/action/smelt_start", json=payload, api_url=api_url)
     if not ok:
         return body
     return f"Smelt started ({inp} x{count} with {fuel}):\n" + _fmt_json(body)
@@ -2231,6 +2440,10 @@ ALTERCRAFT_CRAFT_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "item": {"type": "string", "description": "Minecraft item ID, e.g. 'oak_planks' or 'stone_pickaxe'."},
                 "count": {"type": "integer", "description": "How many to craft (default 1).", "default": 1},
             },
@@ -2251,6 +2464,10 @@ ALTERCRAFT_RECIPES_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "item": {"type": "string", "description": "Minecraft item ID to look up."},
             },
             "required": ["item"],
@@ -2270,6 +2487,10 @@ ALTERCRAFT_SMELT_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "input": {"type": "string", "description": "Item ID to smelt, e.g. 'iron_ore'."},
                 "fuel": {"type": "string", "description": "Fuel item ID, e.g. 'coal'."},
                 "count": {"type": "integer", "description": "Number of items to smelt.", "default": 1},
@@ -2295,6 +2516,10 @@ ALTERCRAFT_SMELT_START_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "input": {"type": "string", "description": "Item ID to smelt."},
                 "fuel": {"type": "string", "description": "Fuel item ID."},
                 "count": {"type": "integer", "description": "Number of items to smelt.", "default": 1},
@@ -2364,19 +2589,21 @@ def _resolve_target(a: dict) -> str | None:
 
 
 def _h_attack(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     """Single hit against a target entity."""
     target = _resolve_target(args or {})
     if not target:
         return "Error: attack requires a target (entity name or uuid)."
-    ok, body = _req("POST", "/action/attack", json={"target": target})
+    ok, body = _req("POST", "/action/attack", json={"target": target}, api_url=api_url)
     if not ok:
         return body
     return f"Attack on {target}:\n" + _fmt_json(body)
 
 
 def _h_eat(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     """Consume the best available food from inventory."""
-    ok, body = _req("POST", "/action/eat", json={})
+    ok, body = _req("POST", "/action/eat", json={}, api_url=api_url)
     if not ok:
         return body
     item = body.get("item") if isinstance(body, dict) else None
@@ -2384,6 +2611,7 @@ def _h_eat(args, **_: Any) -> str:
 
 
 def _h_fight(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     """Sustained combat with optional retreat threshold and duration cap."""
     a = args or {}
     target = _resolve_target(a)
@@ -2394,13 +2622,14 @@ def _h_fight(args, **_: Any) -> str:
         payload["retreat_health"] = float(a["retreat_health"])
     if "duration" in a:
         payload["duration"] = min(float(a["duration"]), 30.0)
-    ok, body = _req("POST", "/task/fight", json=payload)
+    ok, body = _req("POST", "/task/fight", json=payload, api_url=api_url)
     if not ok:
         return body
     return f"Fight vs {target} started:\n" + _fmt_json(body)
 
 
 def _h_flee(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     """Run away from a threat or to a safe distance."""
     a = args or {}
     payload: dict[str, Any] = {}
@@ -2411,35 +2640,38 @@ def _h_flee(args, **_: Any) -> str:
         payload["distance"] = distance
     if "from" in a:
         payload["from"] = str(a["from"])
-    ok, body = _req("POST", "/action/flee", json=payload)
+    ok, body = _req("POST", "/action/flee", json=payload, api_url=api_url)
     if not ok:
         return body
     return "Fleeing:\n" + _fmt_json(body)
 
 
 def _h_sneak(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     """Toggle sneak mode."""
     a = args or {}
     enable = bool(a.get("enable", True))
-    ok, body = _req("POST", "/action/sneak", json={"enable": enable})
+    ok, body = _req("POST", "/action/sneak", json={"enable": enable}, api_url=api_url)
     if not ok:
         return body
     return f"Sneak {'enabled' if enable else 'disabled'}.\n" + _fmt_json(body)
 
 
 def _h_shield_block(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     """Raise shield for a duration (seconds). 0 = indefinite until cancelled."""
     a = args or {}
     payload: dict[str, Any] = {}
     if "duration" in a:
         payload["duration"] = float(a["duration"])
-    ok, body = _req("POST", "/action/shield_block", json=payload)
+    ok, body = _req("POST", "/action/shield_block", json=payload, api_url=api_url)
     if not ok:
         return body
     return "Shield block:\n" + _fmt_json(body)
 
 
 def _h_shoot(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     """Fire bow/crossbow at target with optional leading prediction."""
     a = args or {}
     target = _resolve_target(a)
@@ -2448,37 +2680,40 @@ def _h_shoot(args, **_: Any) -> str:
     payload: dict[str, Any] = {"target": target}
     if "predict" in a:
         payload["predict"] = _safe_bool(a["predict"], False)
-    ok, body = _req("POST", "/action/shoot", json=payload)
+    ok, body = _req("POST", "/action/shoot", json=payload, api_url=api_url)
     if not ok:
         return body
     return f"Shot at {target}:\n" + _fmt_json(body)
 
 
 def _h_sprint_attack(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     """Sprint-hit for extra knockback."""
     a = args or {}
     target = _resolve_target(a)
     if not target:
         return "Error: sprint_attack requires a target."
-    ok, body = _req("POST", "/action/sprint_attack", json={"target": target})
+    ok, body = _req("POST", "/action/sprint_attack", json={"target": target}, api_url=api_url)
     if not ok:
         return body
     return f"Sprint-attack on {target}:\n" + _fmt_json(body)
 
 
 def _h_critical_hit(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     """Jump-crit for ~150% damage."""
     a = args or {}
     target = _resolve_target(a)
     if not target:
         return "Error: critical_hit requires a target."
-    ok, body = _req("POST", "/action/critical_hit", json={"target": target})
+    ok, body = _req("POST", "/action/critical_hit", json={"target": target}, api_url=api_url)
     if not ok:
         return body
     return f"Critical hit on {target}:\n" + _fmt_json(body)
 
 
 def _h_strafe(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     """Lateral movement while fighting (async task)."""
     a = args or {}
     target = _resolve_target(a)
@@ -2489,13 +2724,14 @@ def _h_strafe(args, **_: Any) -> str:
         payload["direction"] = str(a["direction"])
     if "duration" in a:
         payload["duration"] = float(a["duration"])
-    ok, body = _req("POST", "/task/strafe", json=payload)
+    ok, body = _req("POST", "/task/strafe", json=payload, api_url=api_url)
     if not ok:
         return body
     return f"Strafe vs {target} started:\n" + _fmt_json(body)
 
 
 def _h_combo(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     """Chained attack sequence (aggressive/defensive/ranged/berserker)."""
     a = args or {}
     target = _resolve_target(a)
@@ -2507,7 +2743,7 @@ def _h_combo(args, **_: Any) -> str:
         )
     if not target:
         return "Error: combo requires a target."
-    ok, body = _req("POST", "/task/combo", json={"target": target, "style": style})
+    ok, body = _req("POST", "/task/combo", json={"target": target, "style": style}, api_url=api_url)
     if not ok:
         return body
     return f"Combo ({style}) on {target} started:\n" + _fmt_json(body)
@@ -2528,6 +2764,10 @@ ALTERCRAFT_ATTACK_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "target": {
                     "type": "string",
                     "description": "Name or UUID of the entity to attack.",
@@ -2546,7 +2786,12 @@ ALTERCRAFT_EAT_SCHEMA = {
             "Consume the best food item currently in inventory. "
             "Use during or after combat to restore hunger/health."
         ),
-        "parameters": {"type": "object", "properties": {}, "required": []},
+        "parameters": {"type": "object", "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
+            }, "required": []},
     },
 }
 
@@ -2562,6 +2807,10 @@ ALTERCRAFT_FIGHT_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "target": {
                     "type": "string",
                     "description": "Name or UUID of the entity to fight.",
@@ -2593,6 +2842,10 @@ ALTERCRAFT_FLEE_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "distance": {
                     "type": "number",
                     "description": "Minimum blocks to put between bot and threat (default 32).",
@@ -2619,6 +2872,10 @@ ALTERCRAFT_SNEAK_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "enable": {
                     "type": "boolean",
                     "description": "True to start sneaking, False to stop.",
@@ -2642,6 +2899,10 @@ ALTERCRAFT_SHIELD_BLOCK_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "duration": {
                     "type": "number",
                     "description": "Seconds to hold block. 0 or omit = until cancelled.",
@@ -2664,6 +2925,10 @@ ALTERCRAFT_SHOOT_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "target": {
                     "type": "string",
                     "description": "Name or UUID of the entity to shoot.",
@@ -2690,6 +2955,10 @@ ALTERCRAFT_SPRINT_ATTACK_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "target": {
                     "type": "string",
                     "description": "Name or UUID of the entity to charge.",
@@ -2711,6 +2980,10 @@ ALTERCRAFT_CRITICAL_HIT_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "target": {
                     "type": "string",
                     "description": "Name or UUID of the entity to crit.",
@@ -2732,6 +3005,10 @@ ALTERCRAFT_STRAFE_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "target": {
                     "type": "string",
                     "description": "Name or UUID of the entity to strafe around.",
@@ -2764,6 +3041,10 @@ ALTERCRAFT_COMBO_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "target": {
                     "type": "string",
                     "description": "Name or UUID of the entity to combo.",
@@ -2907,18 +3188,20 @@ registry.register(
 
 
 def _h_equip(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     item = (a.get("item") or "").strip()
     if not item:
         return "Error: item is required"
     slot = (a.get("slot") or "hand").strip()
-    ok, body = _req("POST", "/action/equip", json={"item": item, "slot": slot})
+    ok, body = _req("POST", "/action/equip", json={"item": item, "slot": slot}, api_url=api_url)
     if not ok:
         return body
     return f"Equipped {item} to {slot}:\n" + _fmt_json(body)
 
 
 def _h_toss(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     item = (a.get("item") or "").strip()
     if not item:
@@ -2927,74 +3210,82 @@ def _h_toss(args, **_: Any) -> str:
     payload: dict[str, Any] = {"item": item}
     if count is not None:
         payload["count"] = int(count)
-    ok, body = _req("POST", "/action/toss", json=payload)
+    ok, body = _req("POST", "/action/toss", json=payload, api_url=api_url)
     if not ok:
         return body
     return f"Tossed {item}:\n" + _fmt_json(body)
 
 
 def _h_wait(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     seconds = float(a.get("seconds", 5))
-    ok, body = _req("POST", "/action/wait", json={"seconds": seconds})
+    ok, body = _req("POST", "/action/wait", json={"seconds": seconds}, api_url=api_url)
     if not ok:
         return body
     return f"Waited {seconds}s:\n" + _fmt_json(body)
 
 
 def _h_use(args, **_: Any) -> str:
-    ok, body = _req("POST", "/action/use")
+    api_url = _resolve_api_url(args)
+    ok, body = _req("POST", "/action/use", api_url=api_url)
     if not ok:
         return body
     return "Use item:\n" + _fmt_json(body)
 
 
 def _h_sleep_bed(args, **_: Any) -> str:
-    ok, body = _req("POST", "/action/sleep_bed")
+    api_url = _resolve_api_url(args)
+    ok, body = _req("POST", "/action/sleep_bed", api_url=api_url)
     if not ok:
         return body
     return "Sleep:\n" + _fmt_json(body)
 
 
 def _h_complete_command(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     index = int(a.get("index", 0))
-    ok, body = _req("POST", "/action/complete_command", json={"index": index})
+    ok, body = _req("POST", "/action/complete_command", json={"index": index}, api_url=api_url)
     if not ok:
         return body
     return f"Command #{index} completed:\n" + _fmt_json(body)
 
 
 def _h_find_entities(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     payload: dict[str, Any] = {"radius": int(a.get("radius", 32))}
     if "type" in a:
         payload["type"] = str(a["type"])
-    ok, body = _req("POST", "/action/find_entities", json=payload)
+    ok, body = _req("POST", "/action/find_entities", json=payload, api_url=api_url)
     if not ok:
         return body
     return f"Entities found:\n" + _fmt_json(body)
 
 
 def _h_team_chat(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     message = (a.get("message") or "").strip()
     if not message:
         return "Error: message is required"
-    ok, body = _req("POST", "/action/team_chat", json={"message": message})
+    ok, body = _req("POST", "/action/team_chat", json={"message": message}, api_url=api_url)
     if not ok:
         return body
     return f"Team chat:\n" + _fmt_json(body)
 
 
 def _h_team_status(args, **_: Any) -> str:
-    ok, body = _req("POST", "/action/team_status")
+    api_url = _resolve_api_url(args)
+    ok, body = _req("POST", "/action/team_status", api_url=api_url)
     if not ok:
         return body
     return "Team status:\n" + _fmt_json(body)
 
 
 def _h_rally(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     try:
         x, y, z = float(a["x"]), float(a["y"]), float(a["z"])
@@ -3004,24 +3295,26 @@ def _h_rally(args, **_: Any) -> str:
     msg = (a.get("message") or "").strip()
     if msg:
         payload["message"] = msg
-    ok, body = _req("POST", "/action/rally", json=payload)
+    ok, body = _req("POST", "/action/rally", json=payload, api_url=api_url)
     if not ok:
         return body
     return f"Rally set at ({x}, {y}, {z}):\n" + _fmt_json(body)
 
 
 def _h_report(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     message = (a.get("message") or "").strip()
     if not message:
         return "Error: message is required"
-    ok, body = _req("POST", "/action/report", json={"message": message})
+    ok, body = _req("POST", "/action/report", json={"message": message}, api_url=api_url)
     if not ok:
         return body
     return f"Report sent:\n" + _fmt_json(body)
 
 
 def _h_set_team(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     team = (a.get("team") or "").strip()
     if not team:
@@ -3033,16 +3326,17 @@ def _h_set_team(args, **_: Any) -> str:
     teammates = a.get("teammates")
     if teammates is not None:
         payload["teammates"] = teammates
-    ok, body = _req("POST", "/action/set_team", json=payload)
+    ok, body = _req("POST", "/action/set_team", json=payload, api_url=api_url)
     if not ok:
         return body
     return f"Team set to {team}:\n" + _fmt_json(body)
 
 
 def _h_set_fair_play(args, **_: Any) -> str:
+    api_url = _resolve_api_url(args)
     a = args or {}
     enabled = bool(a.get("enabled", True))
-    ok, body = _req("POST", "/action/set_fair_play", json={"enabled": enabled})
+    ok, body = _req("POST", "/action/set_fair_play", json={"enabled": enabled}, api_url=api_url)
     if not ok:
         return body
     return f"Fair play: {enabled}:\n" + _fmt_json(body)
@@ -3052,35 +3346,40 @@ def _h_set_fair_play(args, **_: Any) -> str:
 
 
 def _h_deaths(args, **_: Any) -> str:
-    ok, body = _req("GET", "/deaths")
+    api_url = _resolve_api_url(args)
+    ok, body = _req("GET", "/deaths", api_url=api_url)
     if not ok:
         return body
     return "Deaths:\n" + _fmt_json(body)
 
 
 def _h_team(args, **_: Any) -> str:
-    ok, body = _req("GET", "/team")
+    api_url = _resolve_api_url(args)
+    ok, body = _req("GET", "/team", api_url=api_url)
     if not ok:
         return body
     return "Team config:\n" + _fmt_json(body)
 
 
 def _h_stats(args, **_: Any) -> str:
-    ok, body = _req("GET", "/stats")
+    api_url = _resolve_api_url(args)
+    ok, body = _req("GET", "/stats", api_url=api_url)
     if not ok:
         return body
     return "Combat stats:\n" + _fmt_json(body)
 
 
 def _h_furnaces(args, **_: Any) -> str:
-    ok, body = _req("GET", "/furnaces")
+    api_url = _resolve_api_url(args)
+    ok, body = _req("GET", "/furnaces", api_url=api_url)
     if not ok:
         return body
     return "Active furnaces:\n" + _fmt_json(body)
 
 
 def _h_task_status(args, **_: Any) -> str:
-    ok, body = _req("GET", "/task")
+    api_url = _resolve_api_url(args)
+    ok, body = _req("GET", "/task", api_url=api_url)
     if not ok:
         return body
     return "Task status:\n" + _fmt_json(body)
@@ -3096,6 +3395,10 @@ ALTERCRAFT_EQUIP_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "item": {"type": "string", "description": "Item name, e.g. 'iron_sword' or 'diamond_helmet'."},
                 "slot": {"type": "string", "description": "Slot to equip to. Default: hand.", "default": "hand"},
             },
@@ -3112,6 +3415,10 @@ ALTERCRAFT_TOSS_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "item": {"type": "string", "description": "Item name to drop."},
                 "count": {"type": "integer", "description": "Number to drop. Omit for full stack."},
             },
@@ -3128,6 +3435,10 @@ ALTERCRAFT_WAIT_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "seconds": {"type": "number", "description": "Seconds to wait (default 5, max 60).", "default": 5},
             },
             "required": [],
@@ -3140,7 +3451,12 @@ ALTERCRAFT_USE_SCHEMA = {
     "function": {
         "name": "altercraft_use",
         "description": "Use/activate the currently held item (right-click). E.g. place a boat, throw an eye of ender, eat food, drink a potion.",
-        "parameters": {"type": "object", "properties": {}, "required": []},
+        "parameters": {"type": "object", "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
+            }, "required": []},
     },
 }
 
@@ -3149,7 +3465,12 @@ ALTERCRAFT_SLEEP_BED_SCHEMA = {
     "function": {
         "name": "altercraft_sleep_bed",
         "description": "Find and sleep in the nearest bed within 4 blocks. Sets spawn point and skips night.",
-        "parameters": {"type": "object", "properties": {}, "required": []},
+        "parameters": {"type": "object", "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
+            }, "required": []},
     },
 }
 
@@ -3161,6 +3482,10 @@ ALTERCRAFT_COMPLETE_COMMAND_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "index": {"type": "integer", "description": "Index of the pending command to mark done (default 0).", "default": 0},
             },
             "required": [],
@@ -3176,6 +3501,10 @@ ALTERCRAFT_FIND_ENTITIES_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "type": {"type": "string", "description": "Entity type filter, e.g. 'zombie', 'player', 'cow'. Omit for all."},
                 "radius": {"type": "integer", "description": "Search radius in blocks (default 32, max 64).", "default": 32},
             },
@@ -3192,6 +3521,10 @@ ALTERCRAFT_TEAM_CHAT_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "message": {"type": "string", "description": "Message text to broadcast to teammates."},
             },
             "required": ["message"],
@@ -3204,7 +3537,12 @@ ALTERCRAFT_TEAM_STATUS_SCHEMA = {
     "function": {
         "name": "altercraft_team_status",
         "description": "Get team assignment, role, rally point, and live positions/health of all teammates.",
-        "parameters": {"type": "object", "properties": {}, "required": []},
+        "parameters": {"type": "object", "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
+            }, "required": []},
     },
 }
 
@@ -3216,6 +3554,10 @@ ALTERCRAFT_RALLY_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "x": {"type": "number"},
                 "y": {"type": "number"},
                 "z": {"type": "number"},
@@ -3234,6 +3576,10 @@ ALTERCRAFT_REPORT_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "message": {"type": "string", "description": "Intel message text."},
             },
             "required": ["message"],
@@ -3249,6 +3595,10 @@ ALTERCRAFT_SET_TEAM_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "team": {"type": "string", "description": "Team name or color, e.g. 'red', 'blue', 'alpha'."},
                 "role": {"type": "string", "description": "Role: commander, warrior, ranger, support. Default: warrior.", "default": "warrior"},
                 "teammates": {"type": "array", "items": {"type": "string"}, "description": "List of teammate usernames."},
@@ -3266,6 +3616,10 @@ ALTERCRAFT_SET_FAIR_PLAY_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
                 "enabled": {"type": "boolean", "description": "True to enable fair play, False to disable.", "default": True},
             },
             "required": [],
@@ -3278,7 +3632,12 @@ ALTERCRAFT_DEATHS_SCHEMA = {
     "function": {
         "name": "altercraft_deaths",
         "description": "Get death log: total deaths, last death location, items lost, and seconds since death.",
-        "parameters": {"type": "object", "properties": {}, "required": []},
+        "parameters": {"type": "object", "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
+            }, "required": []},
     },
 }
 
@@ -3287,7 +3646,12 @@ ALTERCRAFT_TEAM_OBS_SCHEMA = {
     "function": {
         "name": "altercraft_team_obs",
         "description": "Get raw team configuration data (team name, role, teammates, rally point, chat history).",
-        "parameters": {"type": "object", "properties": {}, "required": []},
+        "parameters": {"type": "object", "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
+            }, "required": []},
     },
 }
 
@@ -3296,7 +3660,12 @@ ALTERCRAFT_STATS_SCHEMA = {
     "function": {
         "name": "altercraft_stats",
         "description": "Get combat statistics: kills, deaths, assists, damage dealt, damage taken.",
-        "parameters": {"type": "object", "properties": {}, "required": []},
+        "parameters": {"type": "object", "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
+            }, "required": []},
     },
 }
 
@@ -3305,7 +3674,12 @@ ALTERCRAFT_FURNACES_SCHEMA = {
     "function": {
         "name": "altercraft_furnaces",
         "description": "List all active furnaces with their coordinates, input item, ETA, and remaining seconds.",
-        "parameters": {"type": "object", "properties": {}, "required": []},
+        "parameters": {"type": "object", "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
+            }, "required": []},
     },
 }
 
@@ -3314,7 +3688,12 @@ ALTERCRAFT_TASK_STATUS_SCHEMA = {
     "function": {
         "name": "altercraft_task_status",
         "description": "Check the status of the current background task (running, done, error, stuck) and elapsed time.",
-        "parameters": {"type": "object", "properties": {}, "required": []},
+        "parameters": {"type": "object", "properties": {
+                "api_url": {
+                    "type": "string",
+                    "description": "Optional override for the bot API URL. If unset, MC_API_URL env var is used.",
+                },
+            }, "required": []},
     },
 }
 
