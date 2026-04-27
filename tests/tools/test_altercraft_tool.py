@@ -196,3 +196,67 @@ def test_req_gives_up_after_one_retry():
     assert ok is False
     assert "timeout" in body
     assert mock_request.call_count == 2
+
+
+# ==============================================================================
+# HRM-67 — per-call api_url override
+# ==============================================================================
+
+from tools.altercraft_tool import _resolve_api_url, _req, _h_status
+
+
+class TestResolveApiUrl:
+    def test_resolve_api_url_prefers_args_over_env(self, monkeypatch):
+        monkeypatch.setenv("MC_API_URL", "http://env-bot:3001")
+        result = _resolve_api_url({"api_url": "http://args-bot:3002"})
+        assert result == "http://args-bot:3002"
+
+    def test_resolve_api_url_falls_back_to_env(self, monkeypatch):
+        monkeypatch.setenv("MC_API_URL", "http://env-bot:3001")
+        result = _resolve_api_url({})
+        assert result == "http://env-bot:3001"
+
+    def test_resolve_api_url_ignores_non_http(self, monkeypatch):
+        monkeypatch.setenv("MC_API_URL", "http://env-bot:3001")
+        result = _resolve_api_url({"api_url": "not-a-url"})
+        assert result == "http://env-bot:3001"
+
+    def test_resolve_api_url_strips_trailing_slash(self):
+        result = _resolve_api_url({"api_url": "http://bot:3001/"})
+        assert result == "http://bot:3001"
+
+
+def test_req_uses_api_url_kwarg():
+    """_req should hit the api_url passed instead of _api_base()."""
+    ok_resp = _ok_response(json_data={"ok": True})
+    calls = []
+
+    def fake_request(method, url, **kwargs):
+        calls.append((method, url))
+        return ok_resp
+
+    with mock.patch("tools.altercraft_tool.httpx.Client") as MockClient:
+        instance = MockClient.return_value.__enter__.return_value
+        instance.request = fake_request
+        ok, body = _req("GET", "/status", api_url="http://custom:3002")
+
+    assert ok is True
+    assert body == {"ok": True}
+    assert len(calls) == 1
+    assert calls[0] == ("GET", "http://custom:3002/status")
+
+
+def test_handler_routes_to_per_call_url():
+    """_h_status with api_url in args should route request to that URL."""
+    calls = []
+
+    def fake_req(method, path, *, api_url=None, **kwargs):
+        calls.append((method, path, api_url))
+        return True, {"health": 100}
+
+    with mock.patch("tools.altercraft_tool._req", fake_req):
+        result = _h_status({"api_url": "http://special-bot:3003"})
+
+    assert len(calls) == 1
+    assert calls[0] == ("GET", "/status", "http://special-bot:3003")
+    assert "health" in result
