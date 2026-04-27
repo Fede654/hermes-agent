@@ -112,6 +112,27 @@ class TestHandleFunctionCall:
         # pre_tool_call does NOT get duration_ms (nothing has run yet).
         assert "duration_ms" not in kwargs_by_hook["pre_tool_call"]
 
+    def test_parent_agent_passed_to_registry_dispatch(self):
+        """parent_agent should be forwarded to registry.dispatch so tools like
+        run_research and delegate_task receive the agent context."""
+        with patch("model_tools.registry.dispatch", return_value='{"ok":true}') as mock_dispatch:
+            fake_agent = object()
+            result = handle_function_call(
+                "run_research",
+                {"topic": "x", "deliverable": "y", "metric_key": "z"},
+                task_id="task-1",
+                parent_agent=fake_agent,
+            )
+
+        assert result == '{"ok":true}'
+        mock_dispatch.assert_called_once_with(
+            "run_research",
+            {"topic": "x", "deliverable": "y", "metric_key": "z"},
+            task_id="task-1",
+            user_task=None,
+            parent_agent=fake_agent,
+        )
+
 
 # =========================================================================
 # Agent loop tools
