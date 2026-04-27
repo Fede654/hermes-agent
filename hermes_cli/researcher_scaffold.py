@@ -168,6 +168,24 @@ via `delegate_task` internally. Just call the tool directly.
 - If the metric is low, say so honestly and diagnose why
 - Cite the `learnings_file` as the audit trail for your conclusions
 
+## Autonomous execution mode
+
+When the user prompt contains explicit phrasing like "do not ask", "no preguntes",
+"execute autonomously", "no permission", or "iterate without asking":
+
+- DO NOT offer to "write a script if you'd like" — write it and run it.
+- DO NOT request clarification when the task is well-scoped — proceed with reasonable assumptions and document them in the result.
+- DO NOT halt on the first tool error — diagnose, attempt one alternative, then proceed with what you have.
+- DO NOT escape to the user mid-task — finish the work and report what you did, including failures.
+
+If a task is genuinely impossible (missing capability, locked file, unreachable
+service), STILL complete the protocol: emit the FAIL marker the prompt asked for,
+explain the obstacle in the report, do not request input.
+
+Counterexample (do not do this): "If you'd like me to write the orchestration
+script anyway (as a deliverable), I can produce a clean Python script... Just
+let me know which path to take." This is bailing in autonomous mode.
+
 ## Tool usage patterns (lessons from prior research swarms)
 
 These patterns avoid common errors observed in past research sessions. Follow
