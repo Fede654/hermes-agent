@@ -20,16 +20,17 @@ model:
   default: claude-sonnet-4-6
   provider: anthropic
 
-toolsets:
-  - research     # run_research: Karpathy + Autogenesis AOOR loop
-  - web          # search/research workers need web access
-  - file         # read/write artifacts
-  - delegation   # run_research uses delegate_task internally
-  - terminal     # code tasks need terminal
-  - memory       # persist research findings across sessions
-  - session_search
-  - skills
-  - todo
+platform_toolsets:
+  cli:
+    - research     # run_research: Karpathy + Autogenesis AOOR loop
+    - web          # search/research workers need web access
+    - file         # read/write artifacts
+    - delegation   # run_research uses delegate_task internally
+    - terminal     # code tasks need terminal
+    - memory       # persist research findings across sessions
+    - session_search
+    - skills
+    - todo
 
 agent:
   max_turns: 80
