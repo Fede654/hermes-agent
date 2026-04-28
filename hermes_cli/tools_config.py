@@ -59,6 +59,7 @@ CONFIGURABLE_TOOLSETS = [
     ("video",           "🎬 Video Analysis",            "video_analyze (requires video-capable model)"),
     ("image_gen",       "🎨 Image Generation",          "image_generate"),
     ("moa",             "🧠 Mixture of Agents",         "mixture_of_agents"),
+    ("research",        "🔬 Research Loop",             "run_research"),
     ("tts",             "🔊 Text-to-Speech",            "text_to_speech"),
     ("skills",          "📚 Skills",                    "list, view, manage"),
     ("todo",            "📋 Task Planning",             "todo"),
@@ -868,6 +869,12 @@ def _get_platform_tools(
 
     platform_toolsets = config.get("platform_toolsets") or {}
     toolset_names = platform_toolsets.get(platform)
+
+    # Fallback: profile configs may use the top-level `toolsets:` key (legacy
+    # researcher scaffold and some user configs). Only honoured for the CLI
+    # platform so we don't conflate cross-platform settings.
+    if toolset_names is None and platform == "cli":
+        toolset_names = config.get("toolsets")
 
     if toolset_names is None or not isinstance(toolset_names, list):
         plat_info = PLATFORMS.get(platform)
