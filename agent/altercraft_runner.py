@@ -272,6 +272,8 @@ class ReactiveLoop:
     def _is_addressed(self, event: dict) -> bool:
         # Heuristics that match server.js chat conventions:
         # - `private: true`  → this was a DM to us specifically
+        # - `whisper: true`  → server-side whisper /msg
+        # - `targets` list includes our name → explicitly routed
         # - `Name:` or `Name,` prefix in the text → routed to us
         # - Our name appears anywhere in the text → mention
         text = (event.get("message") or event.get("text") or "").strip()
@@ -282,6 +284,15 @@ class ReactiveLoop:
             return False  # don't respond to self
         if event.get("private") is True:
             return True
+        if event.get("whisper") is True:
+            return True
+        targets = event.get("targets") or event.get("to") or []
+        if isinstance(targets, list):
+            if self.mc_username.lower() in [t.lower() for t in targets if isinstance(t, str)]:
+                return True
+        elif isinstance(targets, str):
+            if targets.lower() == self.mc_username.lower():
+                return True
         if etype in ("whisper", "dm"):
             return True
         lt = text.lower()
