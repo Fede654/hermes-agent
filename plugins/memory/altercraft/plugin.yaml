@@ -1,0 +1,6 @@
+name: altercraft
+version: 0.1.0
+description: "AlterCraft world memory — locations, players, events, preferences, strategies. Persistent JSON store under ~/.hermes/profiles/altercraft-<persona>/memory/."
+pip_dependencies: []
+hooks:
+  - on_session_end
