@@ -117,6 +117,37 @@ _RECALL_EVENTS_SCHEMA = {
     },
 }
 
+# ─── Scene-graph (MVP) tool schema ────────────────────────────────────────
+# Spec: Alter-infra:docs/superpowers/specs/2026-04-29-scene-graph-narrative-memory.md
+# Appendix A — first useful commit.
+
+_GRAPH_QUERY_NEAR_SCHEMA = {
+    "name": "altercraft_graph_query_near",
+    "description": (
+        "Spatial query against the AlterCraft scene graph. Returns nodes "
+        "(places, players, structures, etc.) whose bbox overlaps a cube "
+        "of side 2*radius around (x, y, z), sorted by distance. Use this "
+        "when the player asks 'what's around here', or when you need to "
+        "know whether you're near a known landmark before acting."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "x": {"type": "number"},
+            "y": {"type": "number"},
+            "z": {"type": "number"},
+            "radius": {"type": "number", "description": "Search radius in blocks (default 50)."},
+            "types": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional filter (e.g. ['place', 'player', 'construction']).",
+            },
+            "limit": {"type": "integer", "description": "Max nodes returned (default 20)."},
+        },
+        "required": ["x", "y", "z"],
+    },
+}
+
 
 # ─── Provider ──────────────────────────────────────────────────────────────
 
@@ -156,6 +187,21 @@ class AltercraftMemoryProvider(MemoryProvider):
             "altercraft memory provider initialized: persona=%s session=%s",
             self._persona, session_id,
         )
+        # MVP scene-graph migration: idempotent flat-JSON → SQL on first
+        # run. Subsequent runs find the DB present and migrate-skip
+        # duplicate rows.
+        try:
+            from .migrate import migrate_persona
+            counts = migrate_persona(self._persona, persona_username=self._persona)
+            if any(counts.values()):
+                logger.info(
+                    "altercraft scene-graph migration: persona=%s %s",
+                    self._persona, counts,
+                )
+        except Exception as exc:
+            logger.warning(
+                "altercraft scene-graph migration skipped: %s", exc,
+            )
 
     def shutdown(self) -> None:
         # Nothing to flush — every write is atomic on its own.
@@ -197,6 +243,7 @@ class AltercraftMemoryProvider(MemoryProvider):
             _RECALL_LOCATIONS_SCHEMA,
             _RECORD_EVENT_SCHEMA,
             _RECALL_EVENTS_SCHEMA,
+            _GRAPH_QUERY_NEAR_SCHEMA,
         ]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
@@ -232,6 +279,11 @@ class AltercraftMemoryProvider(MemoryProvider):
                     "notes": str(args.get("notes") or ""),
                 }
                 save_memory(self._persona, "locations", locs)
+                # MVP dual-write: keep the SQL store in sync so spatial
+                # queries see the new location without re-running the
+                # migrator. The flat JSON remains authoritative for the
+                # legacy recall paths until V1 flips them.
+                self._sql_upsert_place(name, locs[name])
                 return json.dumps({"ok": True, "location": locs[name]})
 
             if tool_name == "altercraft_recall_locations":
@@ -247,7 +299,37 @@ class AltercraftMemoryProvider(MemoryProvider):
                 if isinstance(details, dict):
                     event.update(details)
                 append_event(self._persona, event)
+                # Dual-write into episodes table for temporal queries.
+                self._sql_record_episode(event)
                 return json.dumps({"ok": True, "recorded": event["type"]})
+
+            if tool_name == "altercraft_graph_query_near":
+                from .world import connect, query_near
+                try:
+                    x = float(args["x"]); y = float(args["y"]); z = float(args["z"])
+                except (KeyError, TypeError, ValueError):
+                    return json.dumps({"ok": False, "error": "x, y, z required (numbers)"})
+                radius = float(args.get("radius") or 50)
+                types = args.get("types")
+                if isinstance(types, str):
+                    types = [types]
+                limit = int(args.get("limit") or 20)
+                conn = connect(self._persona)
+                try:
+                    nodes = query_near(conn, x, y, z, radius,
+                                       types=types if types else None,
+                                       limit=limit)
+                finally:
+                    conn.close()
+                # Strip embedding BLOB from output (binary; large; not
+                # useful in-prompt). Strip mood_history too — its raw
+                # JSON is verbose; future tools surface it explicitly.
+                cleaned = []
+                for n in nodes:
+                    n.pop("embedding", None)
+                    n.pop("mood_history", None)
+                    cleaned.append(n)
+                return json.dumps({"ok": True, "nodes": cleaned})
 
             if tool_name == "altercraft_recall_events":
                 n = int(args.get("n") or 10)
@@ -260,6 +342,74 @@ class AltercraftMemoryProvider(MemoryProvider):
         except Exception as e:
             logger.exception("altercraft tool %s failed", tool_name)
             return json.dumps({"ok": False, "error": str(e)})
+
+    # ── SQL dual-write helpers (MVP) ─────────────────────────────────
+
+    def _sql_upsert_place(self, name: str, info: Dict[str, Any]) -> None:
+        """Mirror an `altercraft_remember_location` write into nodes."""
+        if not self._persona:
+            return
+        try:
+            from .world import connect, get_or_create_persona, upsert_node
+            conn = connect(self._persona)
+            try:
+                pid = get_or_create_persona(conn, self._persona)
+                upsert_node(
+                    conn,
+                    uri=f"place:{name}",
+                    type="place",
+                    name=name,
+                    pos=(float(info["x"]), float(info["y"]), float(info["z"])),
+                    attrs={
+                        k: v for k, v in info.items()
+                        if k not in ("x", "y", "z")
+                    },
+                    observed_by=pid,
+                    salience=0.6,
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.warning("sql dual-write upsert_place failed: %s", exc)
+
+    def _sql_record_episode(self, event: Dict[str, Any]) -> None:
+        """Mirror an `altercraft_record_event` write into episodes."""
+        if not self._persona:
+            return
+        try:
+            from .world import connect, get_or_create_persona
+            conn = connect(self._persona)
+            try:
+                pid = get_or_create_persona(conn, self._persona)
+                ts = event.get("ts")
+                if not isinstance(ts, (int, float)):
+                    import time as _time
+                    ts = _time.time()
+                kind = str(event.get("type") or event.get("kind") or "event")
+                body = str(event.get("description") or event.get("body") or "")
+                pos_x = event.get("x")
+                pos_y = event.get("y")
+                pos_z = event.get("z")
+                detail = {
+                    k: v for k, v in event.items()
+                    if k not in ("ts", "type", "kind", "description", "body",
+                                 "x", "y", "z")
+                }
+                conn.execute(
+                    "INSERT INTO episodes(ts, kind, body, detail, persona_id, "
+                    "pos_x, pos_y, pos_z) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        float(ts), kind, body,
+                        json.dumps(detail, sort_keys=True, default=str),
+                        pid, pos_x, pos_y, pos_z,
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.warning("sql dual-write record_episode failed: %s", exc)
 
 
 # ─── Plugin registration ─────────────────────────────────────────────────

@@ -42,6 +42,7 @@ def test_provider_loads_and_advertises_correctly(plugin):
         "altercraft_recall_locations",
         "altercraft_record_event",
         "altercraft_recall_events",
+        "altercraft_graph_query_near",
     }
 
 
@@ -205,3 +206,283 @@ def test_persona_isolation_two_personas_dont_share(tmp_hermes):
     assert parsed["ok"] is True
     # erato persona should not see clio's locations
     assert "clio-place" not in parsed["locations"]
+
+
+# ─── Scene-graph MVP tests (Phase 9 / Appendix A) ──────────────────────
+
+
+class TestSceneGraphSchema:
+    """Verify that initialize() sets up the SQL world DB cleanly."""
+
+    def test_initialize_creates_world_db(self, plugin, tmp_hermes):
+        plugin.initialize("session", agent_identity="altercraft-clio")
+        from plugins.memory.altercraft.world import world_db_path
+        path = world_db_path("clio")
+        assert path.exists(), f"world DB not created at {path}"
+
+    def test_world_db_has_schema_version(self, plugin, tmp_hermes):
+        plugin.initialize("session", agent_identity="altercraft-clio")
+        import sqlite3
+        from plugins.memory.altercraft.world import world_db_path
+        conn = sqlite3.connect(str(world_db_path("clio")))
+        try:
+            row = conn.execute(
+                "SELECT value FROM world_meta WHERE key = 'schema_version'"
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row is not None
+        assert row[0] == "1"
+
+    def test_world_db_has_required_tables(self, plugin, tmp_hermes):
+        plugin.initialize("session", agent_identity="altercraft-clio")
+        import sqlite3
+        from plugins.memory.altercraft.world import world_db_path
+        conn = sqlite3.connect(str(world_db_path("clio")))
+        try:
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type IN ('table', 'virtual')"
+                ).fetchall()
+            }
+        finally:
+            conn.close()
+        # All core tables should be present.
+        assert {"world_meta", "personas", "nodes", "edges",
+                "episodes", "episode_nodes", "nodes_spatial"}.issubset(tables)
+
+
+class TestMigration:
+    """Idempotent flat-JSON → SQL migration."""
+
+    def test_migration_imports_existing_locations(self, plugin, tmp_hermes):
+        # Pre-seed flat JSON
+        from agent.altercraft_memory import save_memory
+        save_memory("clio", "locations", {
+            "cabin": {"x": 100, "y": 64, "z": -50, "notes": "by the river"},
+            "spawn": {"x": 0, "y": 64, "z": 0},
+        })
+        # Now initialize — migration should run
+        plugin.initialize("session", agent_identity="altercraft-clio")
+
+        # Verify both locations made it to nodes table
+        import sqlite3
+        from plugins.memory.altercraft.world import world_db_path
+        conn = sqlite3.connect(str(world_db_path("clio")))
+        try:
+            rows = conn.execute(
+                "SELECT uri, name, pos_x, pos_y, pos_z FROM nodes WHERE type='place' ORDER BY name"
+            ).fetchall()
+        finally:
+            conn.close()
+        assert len(rows) == 2
+        names = {r[1] for r in rows}
+        assert names == {"cabin", "spawn"}
+
+    def test_migration_imports_events(self, plugin, tmp_hermes):
+        from agent.altercraft_memory import append_event
+        append_event("clio", {"type": "discovery", "description": "found a cave"})
+        append_event("clio", {"type": "death", "description": "killed by skeleton"})
+        plugin.initialize("session", agent_identity="altercraft-clio")
+
+        import sqlite3
+        from plugins.memory.altercraft.world import world_db_path
+        conn = sqlite3.connect(str(world_db_path("clio")))
+        try:
+            rows = conn.execute(
+                "SELECT kind, body FROM episodes ORDER BY kind"
+            ).fetchall()
+        finally:
+            conn.close()
+        kinds = sorted(r[0] for r in rows)
+        assert kinds == ["death", "discovery"]
+
+    def test_migration_is_idempotent(self, plugin, tmp_hermes):
+        """Re-initializing on a populated DB does not duplicate rows."""
+        from agent.altercraft_memory import append_event, save_memory
+        save_memory("clio", "locations", {"x": {"x": 1, "y": 1, "z": 1}})
+        append_event("clio", {"type": "discovery", "description": "ye"})
+
+        plugin.initialize("s1", agent_identity="altercraft-clio")
+        plugin.initialize("s2", agent_identity="altercraft-clio")
+
+        import sqlite3
+        from plugins.memory.altercraft.world import world_db_path
+        conn = sqlite3.connect(str(world_db_path("clio")))
+        try:
+            n_nodes = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+            n_eps = conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
+        finally:
+            conn.close()
+        assert n_nodes == 1
+        assert n_eps == 1
+
+
+class TestDualWrite:
+    """Existing tools should mirror writes into the SQL store."""
+
+    def test_remember_location_dual_writes(self, plugin, tmp_hermes):
+        plugin.initialize("session", agent_identity="altercraft-clio")
+        plugin.handle_tool_call("altercraft_remember_location", {
+            "name": "outpost", "x": 50, "y": 70, "z": 100, "notes": "north scout",
+        })
+        import sqlite3
+        from plugins.memory.altercraft.world import world_db_path
+        conn = sqlite3.connect(str(world_db_path("clio")))
+        try:
+            row = conn.execute(
+                "SELECT name, pos_x, pos_y, pos_z, attrs FROM nodes WHERE uri='place:outpost'"
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row is not None
+        assert row[0] == "outpost"
+        assert row[1] == 50.0
+        assert row[2] == 70.0
+        assert row[3] == 100.0
+        assert "north scout" in row[4]
+
+    def test_record_event_dual_writes(self, plugin, tmp_hermes):
+        plugin.initialize("session", agent_identity="altercraft-clio")
+        plugin.handle_tool_call("altercraft_record_event", {
+            "type": "build",
+            "description": "placed first chest",
+            "details": {"x": 10, "y": 64, "z": 10},
+        })
+        import sqlite3
+        from plugins.memory.altercraft.world import world_db_path
+        conn = sqlite3.connect(str(world_db_path("clio")))
+        try:
+            rows = conn.execute(
+                "SELECT kind, body, pos_x FROM episodes WHERE kind='build'"
+            ).fetchall()
+        finally:
+            conn.close()
+        assert len(rows) == 1
+        assert rows[0][1] == "placed first chest"
+        assert rows[0][2] == 10.0
+
+
+class TestGraphQueryNear:
+    """The new spatial query — the round-trip Appendix A asks for."""
+
+    def test_query_near_finds_recent_writes(self, plugin, tmp_hermes):
+        plugin.initialize("session", agent_identity="altercraft-clio")
+        plugin.handle_tool_call("altercraft_remember_location", {
+            "name": "cabin", "x": 100, "y": 64, "z": -50,
+        })
+        plugin.handle_tool_call("altercraft_remember_location", {
+            "name": "tower", "x": 1000, "y": 64, "z": -50,  # far away
+        })
+        out = plugin.handle_tool_call("altercraft_graph_query_near", {
+            "x": 105, "y": 64, "z": -45, "radius": 20,
+        })
+        parsed = json.loads(out)
+        assert parsed["ok"] is True
+        names = [n["name"] for n in parsed["nodes"]]
+        assert "cabin" in names
+        assert "tower" not in names
+
+    def test_query_near_sorts_by_distance(self, plugin, tmp_hermes):
+        plugin.initialize("session", agent_identity="altercraft-clio")
+        plugin.handle_tool_call("altercraft_remember_location", {
+            "name": "near", "x": 5, "y": 64, "z": 0,
+        })
+        plugin.handle_tool_call("altercraft_remember_location", {
+            "name": "mid", "x": 30, "y": 64, "z": 0,
+        })
+        plugin.handle_tool_call("altercraft_remember_location", {
+            "name": "far", "x": 60, "y": 64, "z": 0,
+        })
+        out = plugin.handle_tool_call("altercraft_graph_query_near", {
+            "x": 0, "y": 64, "z": 0, "radius": 100,
+        })
+        parsed = json.loads(out)
+        names = [n["name"] for n in parsed["nodes"]]
+        assert names == ["near", "mid", "far"]
+
+    def test_query_near_filters_types(self, plugin, tmp_hermes):
+        plugin.initialize("session", agent_identity="altercraft-clio")
+        plugin.handle_tool_call("altercraft_remember_location", {
+            "name": "spawn", "x": 0, "y": 64, "z": 0,
+        })
+        # players have no spatial position by default — they shouldn't
+        # show up in nearby queries.
+        from plugins.memory.altercraft.world import connect, upsert_node
+        conn = connect("clio")
+        try:
+            upsert_node(conn, uri="player:fede", type="player", name="fede")
+            conn.commit()
+        finally:
+            conn.close()
+        out = plugin.handle_tool_call("altercraft_graph_query_near", {
+            "x": 0, "y": 64, "z": 0, "radius": 50, "types": ["place"],
+        })
+        parsed = json.loads(out)
+        types = {n["type"] for n in parsed["nodes"]}
+        assert types == {"place"}
+
+    def test_query_near_rejects_missing_coords(self, plugin, tmp_hermes):
+        plugin.initialize("session", agent_identity="altercraft-clio")
+        out = plugin.handle_tool_call("altercraft_graph_query_near", {})
+        parsed = json.loads(out)
+        assert parsed["ok"] is False
+        assert "x, y, z" in parsed["error"]
+
+    def test_query_near_returns_distance(self, plugin, tmp_hermes):
+        plugin.initialize("session", agent_identity="altercraft-clio")
+        plugin.handle_tool_call("altercraft_remember_location", {
+            "name": "p", "x": 3, "y": 4, "z": 0,
+        })
+        out = plugin.handle_tool_call("altercraft_graph_query_near", {
+            "x": 0, "y": 0, "z": 0, "radius": 10,
+        })
+        parsed = json.loads(out)
+        assert len(parsed["nodes"]) == 1
+        # distance should be 5 (3-4-5 triangle)
+        assert abs(parsed["nodes"][0]["distance"] - 5.0) < 1e-6
+
+    def test_query_near_strips_embedding_blob(self, plugin, tmp_hermes):
+        plugin.initialize("session", agent_identity="altercraft-clio")
+        plugin.handle_tool_call("altercraft_remember_location", {
+            "name": "p", "x": 0, "y": 0, "z": 0,
+        })
+        out = plugin.handle_tool_call("altercraft_graph_query_near", {
+            "x": 0, "y": 0, "z": 0, "radius": 5,
+        })
+        parsed = json.loads(out)
+        assert "embedding" not in parsed["nodes"][0]
+        assert "mood_history" not in parsed["nodes"][0]
+
+
+class TestPersonaIsolationSQL:
+    """Same isolation guarantee as the JSON store, but for SQL."""
+
+    def test_two_personas_get_different_dbs(self, tmp_hermes):
+        from plugins.memory import load_memory_provider
+        from plugins.memory.altercraft.world import world_db_path
+
+        p1 = load_memory_provider("altercraft")
+        p1.initialize("s", agent_identity="altercraft-clio")
+        p1.handle_tool_call("altercraft_remember_location", {
+            "name": "x", "x": 0, "y": 0, "z": 0,
+        })
+
+        p2 = load_memory_provider("altercraft")
+        p2.initialize("s", agent_identity="altercraft-erato")
+
+        # Query from erato's plugin — should see no nodes
+        out = p2.handle_tool_call("altercraft_graph_query_near", {
+            "x": 0, "y": 0, "z": 0, "radius": 10,
+        })
+        import json as _json
+        parsed = _json.loads(out)
+        assert parsed["ok"] is True
+        assert parsed["nodes"] == []
+
+        # And the DB files are separate
+        assert world_db_path("clio") != world_db_path("erato")
+        assert world_db_path("clio").exists()
+        assert world_db_path("erato").exists()
