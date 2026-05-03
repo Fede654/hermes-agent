@@ -43,6 +43,7 @@ def test_provider_loads_and_advertises_correctly(plugin):
         "altercraft_record_event",
         "altercraft_recall_events",
         "altercraft_graph_query_near",
+        "altercraft_consolidate_batch",
     }
 
 
@@ -550,3 +551,25 @@ class TestInjectNarrativeContext:
         msgs = self._make_messages()
         result = plugin._inject_spatial_context(msgs, "s", "model", "platform")
         assert result is None
+
+
+# ─── Consolidate-batch tool tests ───────────────────────────────────────────
+
+
+class TestConsolidateBatch:
+    def test_consolidate_batch_in_tool_registry(self, plugin):
+        names = {s["name"] for s in plugin.get_tool_schemas()}
+        assert "altercraft_consolidate_batch" in names
+
+    def test_consolidate_batch_returns_consolidated_string(self, plugin, tmp_hermes, monkeypatch):
+        from plugins.memory.altercraft import consolidator as _con
+
+        monkeypatch.setattr(
+            _con,
+            "run_consolidator",
+            lambda persona, dry_run=False: {"consolidated": 3, "skipped": 1, "dry_run": dry_run},
+        )
+        plugin.initialize("session", agent_identity="altercraft-clio")
+        out = plugin.handle_tool_call("altercraft_consolidate_batch", {})
+        assert "consolidated" in out.lower()
+        assert "3" in out

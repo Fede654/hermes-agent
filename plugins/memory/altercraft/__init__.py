@@ -149,6 +149,29 @@ _GRAPH_QUERY_NEAR_SCHEMA = {
 }
 
 
+_CONSOLIDATE_BATCH_SCHEMA = {
+    "name": "altercraft_consolidate_batch",
+    "description": (
+        "Trigger a narrative-consolidation pass over recent AlterCraft episodes. "
+        "Reads raw events from the episode store, groups them into thematic clusters, "
+        "and writes consolidated library entries. Use after a session ends or when "
+        "the event log is getting long. Returns a summary of how many episodes were "
+        "consolidated."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "dry_run": {
+                "type": "boolean",
+                "description": "If true, report what would be consolidated without writing.",
+                "default": False,
+            },
+        },
+        "required": [],
+    },
+}
+
+
 # ─── Provider ──────────────────────────────────────────────────────────────
 
 
@@ -208,6 +231,7 @@ class AltercraftMemoryProvider(MemoryProvider):
         # Register hooks if we have a real ctx (not during test discovery).
         if self._ctx is not None:
             self._ctx.register_hook("transform_tool_result", self._on_perceive)
+            self._ctx.register_hook("transform_tool_result", self._on_action_result)
             self._ctx.register_hook("pre_llm_call", self._inject_spatial_context)
 
     def shutdown(self) -> None:
@@ -251,6 +275,7 @@ class AltercraftMemoryProvider(MemoryProvider):
             _RECORD_EVENT_SCHEMA,
             _RECALL_EVENTS_SCHEMA,
             _GRAPH_QUERY_NEAR_SCHEMA,
+            _CONSOLIDATE_BATCH_SCHEMA,
         ]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
@@ -337,6 +362,18 @@ class AltercraftMemoryProvider(MemoryProvider):
                     n.pop("mood_history", None)
                     cleaned.append(n)
                 return json.dumps({"ok": True, "nodes": cleaned})
+
+            if tool_name == "altercraft_consolidate_batch":
+                dry_run = bool(args.get("dry_run") or False)
+                from .consolidator import run_consolidator
+                result = run_consolidator(self._persona, dry_run=dry_run)
+                consolidated = result.get("consolidated", 0)
+                skipped = result.get("skipped", 0)
+                suffix = " (dry run)" if result.get("dry_run") else ""
+                return (
+                    f"Consolidation complete{suffix}: "
+                    f"{consolidated} episode(s) consolidated, {skipped} skipped."
+                )
 
             if tool_name == "altercraft_recall_events":
                 n = int(args.get("n") or 10)
@@ -428,6 +465,84 @@ class AltercraftMemoryProvider(MemoryProvider):
                 conn.close()
         except Exception as exc:
             logger.warning("altercraft _on_perceive hook failed: %s", exc)
+        return None
+
+    # ─── Action-result auto-detection ────────────────────────────────────
+
+    _CONSTRUCTION_LABELS = ("place", "build", "craft", "smelt")
+    _ADVENTURE_LABELS = ("mine", "kill", "hunt", "explore", "collect")
+
+    def _on_action_result(
+        self,
+        tool_name: str,
+        args: dict,
+        result: str,
+        task_id: str,
+        session_id: str,
+        tool_call_id: str,
+        duration_ms: int,
+    ) -> Optional[str]:
+        """transform_tool_result: persist construction/adventure episodes from mc_action_result."""
+        if tool_name != "mc_action_result":
+            return None
+        if not self._persona:
+            return None
+        try:
+            data = json.loads(result)
+        except Exception:
+            return None
+
+        if not data.get("ok"):
+            return None
+
+        label = str(data.get("label") or "").lower()
+        if not label:
+            return None
+
+        kind: Optional[str] = None
+        if any(kw in label for kw in self._CONSTRUCTION_LABELS):
+            kind = "construction"
+        elif any(kw in label for kw in self._ADVENTURE_LABELS):
+            kind = "adventure"
+
+        if kind is None:
+            return None
+
+        try:
+            from .world import connect, get_or_create_persona
+            import time as _time
+            from uuid import uuid4
+
+            conn = connect(self._persona)
+            try:
+                pid = get_or_create_persona(conn, self._persona)
+                episode_id = str(uuid4())
+                detail = {
+                    "label": data.get("label"),
+                    "goal": data.get("goal"),
+                    "duration_ms": data.get("duration_ms"),
+                }
+                conn.execute(
+                    "INSERT INTO episodes(id, ts, kind, body, detail, persona_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        episode_id,
+                        _time.time(),
+                        kind,
+                        str(data.get("label") or ""),
+                        json.dumps(detail, sort_keys=True, default=str),
+                        pid,
+                    ),
+                )
+                conn.commit()
+                logger.debug(
+                    "altercraft _on_action_result: inserted %s episode id=%s label=%s",
+                    kind, episode_id, data.get("label"),
+                )
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.warning("altercraft _on_action_result hook failed: %s", exc)
         return None
 
     def _inject_spatial_context(
