@@ -243,6 +243,13 @@ class DaemonCraftAdapter(BasePlatformAdapter):
         else:
             logger.debug("[DaemonCraft] Unknown WS message type: %s", msg_type)
 
+    async def _handle_action_result(self, payload: dict) -> None:
+        """Forward action_result WS events to the memory plugin hook."""
+        import json as _json
+        result_str = _json.dumps(payload)
+        await self.invoke_hook("transform_tool_result", tool_name="mc_action_result",
+                               args={}, result=result_str)
+
     async def _handle_chat_batch(self, messages: list) -> None:
         """Process a batch of chat messages with bot filtering and @mention classification.
 
