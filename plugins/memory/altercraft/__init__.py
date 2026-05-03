@@ -162,6 +162,8 @@ class AltercraftMemoryProvider(MemoryProvider):
     def __init__(self) -> None:
         self._persona: Optional[str] = None
         self._initialized: bool = False
+        self._last_position: Optional[tuple] = None  # (x, y, z)
+        self._ctx = None  # set by register()
 
     # ── Lifecycle ────────────────────────────────────────────────────
 
@@ -202,6 +204,11 @@ class AltercraftMemoryProvider(MemoryProvider):
             logger.warning(
                 "altercraft scene-graph migration skipped: %s", exc,
             )
+
+        # Register hooks if we have a real ctx (not during test discovery).
+        if self._ctx is not None:
+            self._ctx.register_hook("transform_tool_result", self._on_perceive)
+            self._ctx.register_hook("pre_llm_call", self._inject_spatial_context)
 
     def shutdown(self) -> None:
         # Nothing to flush — every write is atomic on its own.
@@ -343,6 +350,133 @@ class AltercraftMemoryProvider(MemoryProvider):
             logger.exception("altercraft tool %s failed", tool_name)
             return json.dumps({"ok": False, "error": str(e)})
 
+    # ── Lifecycle hooks ───────────────────────────────────────────────
+
+    def _on_perceive(
+        self,
+        tool_name: str,
+        args: dict,
+        result: str,
+        task_id: str,
+        session_id: str,
+        tool_call_id: str,
+        duration_ms: int,
+    ) -> Optional[str]:
+        """transform_tool_result: persist mc_perceive data to scene graph."""
+        if tool_name != "mc_perceive":
+            return None
+        if not self._persona:
+            return None
+        try:
+            data = json.loads(result)
+        except Exception:
+            return None
+        try:
+            pos = (data.get("status") or {}).get("position") or {}
+            bx = pos.get("x")
+            by = pos.get("y")
+            bz = pos.get("z")
+            if bx is None or by is None or bz is None:
+                return None
+            bx, by, bz = float(bx), float(by), float(bz)
+            self._last_position = (bx, by, bz)
+
+            from .world import connect, get_or_create_persona, upsert_node
+            conn = connect(self._persona)
+            try:
+                pid = get_or_create_persona(conn, self._persona)
+                status = data.get("status") or {}
+                upsert_node(
+                    conn,
+                    uri="bot_position",
+                    type="bot",
+                    name="Bot position",
+                    pos=(bx, by, bz),
+                    attrs={"health": status.get("health"), "food": status.get("food")},
+                    observed_by=pid,
+                    salience=0.8,
+                )
+                nearby = data.get("nearby") or {}
+                for ent in (nearby.get("entities") or [])[:8]:
+                    ename = str(ent.get("name") or "unknown")
+                    etype = "mob" if ename.lower() not in ("player",) else "player"
+                    dist = float(ent.get("distance") or 0)
+                    upsert_node(
+                        conn,
+                        uri=f"entity_{ename}_{round(bx)}_{round(bz)}",
+                        type=etype,
+                        name=ename,
+                        pos=(bx, by + dist * 0.1, bz + dist),
+                        attrs={"distance": dist},
+                        observed_by=pid,
+                        salience=0.4,
+                    )
+                import time as _time
+                conn.execute(
+                    "INSERT INTO episodes(ts, kind, body, detail, persona_id) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        _time.time(),
+                        "perceive",
+                        f"mc_perceive at ({round(bx)},{round(by)},{round(bz)})",
+                        result[:1000],
+                        pid,
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.warning("altercraft _on_perceive hook failed: %s", exc)
+        return None
+
+    def _inject_spatial_context(
+        self,
+        messages: list,
+        session_id: str,
+        model: str,
+        platform: str,
+        **kwargs,
+    ) -> Optional[dict]:
+        """pre_llm_call: prepend spatial context on first turn of new session."""
+        if len(messages) > 1:
+            return None
+        if not self._persona or self._last_position is None:
+            return None
+        try:
+            x, y, z = self._last_position
+            from .world import connect, query_near
+            conn = connect(self._persona)
+            try:
+                nodes = query_near(conn, x, y, z, radius=50, limit=12)
+            finally:
+                conn.close()
+            if not nodes:
+                return None
+            lines = [
+                f"## Nearby (last known position: x={round(x)} y={round(y)} z={round(z)})"
+            ]
+            for n in nodes:
+                nx = round(n.get("pos_x") or 0)
+                ny = round(n.get("pos_y") or 0)
+                nz = round(n.get("pos_z") or 0)
+                lines.append(
+                    f'- {n.get("type","?")} "{n.get("name","?")}" at ({nx},{ny},{nz})'
+                )
+            block = "<spatial_context>\n" + "\n".join(lines) + "\n</spatial_context>\n"
+            msgs = [dict(m) for m in messages]
+            if msgs:
+                first = msgs[0]
+                content = first.get("content") or ""
+                if isinstance(content, list):
+                    msgs[0] = {**first, "content": [{"type": "text", "text": block}] + content}
+                else:
+                    msgs[0] = {**first, "content": block + str(content)}
+            return {"messages": msgs}
+        except Exception as exc:
+            logger.warning("altercraft _inject_spatial_context hook failed: %s", exc)
+            return None
+
     # ── SQL dual-write helpers (MVP) ─────────────────────────────────
 
     def _sql_upsert_place(self, name: str, info: Dict[str, Any]) -> None:
@@ -417,4 +551,6 @@ class AltercraftMemoryProvider(MemoryProvider):
 
 def register(ctx) -> None:
     """Plugin entry point — called by plugins/memory discovery."""
-    ctx.register_memory_provider(AltercraftMemoryProvider())
+    provider = AltercraftMemoryProvider()
+    provider._ctx = ctx
+    ctx.register_memory_provider(provider)

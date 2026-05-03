@@ -74,7 +74,7 @@ def test_post_writes_minecraft_handoff_when_platform_kwarg_minecraft(fresh_plugi
         conversation_history=[],
         platform="minecraft",
     )
-    mc_path = base / "state" / "DIALOGUE-HANDOFF.minecraft.md"
+    mc_path = base / "state" / "DIALOGUE-HANDOFF.minecraft.s1.md"
     assert mc_path.exists(), "minecraft handoff file not created"
     text = mc_path.read_text()
     assert "## Recent Exchanges" in text
@@ -100,12 +100,13 @@ def test_post_does_not_overwrite_cli_when_platform_minecraft(fresh_plugin):
         platform="minecraft",
     )
     assert cli_path.read_text() == "CLI SENTINEL — do not touch"
+    mc_path = base / "state" / "DIALOGUE-HANDOFF.minecraft.s.md"
     assert mc_path.exists()
 
 
 def test_substantive_gate_skips_trivial_turn(fresh_plugin):
     mod, base = fresh_plugin
-    mc_path = base / "state" / "DIALOGUE-HANDOFF.minecraft.md"
+    mc_path = base / "state" / "DIALOGUE-HANDOFF.minecraft.s.md"
     # Trivial turn: passes the >=3 chars sanity gate but combined <300
     # chars, so the substantive gate skips the TAIL update. The
     # metadata header IS still written.
@@ -124,7 +125,7 @@ def test_substantive_gate_skips_trivial_turn(fresh_plugin):
 
 def test_substantive_gate_preserves_existing_tail_under_trivial_turn(fresh_plugin):
     mod, base = fresh_plugin
-    mc_path = base / "state" / "DIALOGUE-HANDOFF.minecraft.md"
+    mc_path = base / "state" / "DIALOGUE-HANDOFF.minecraft.s1.md"
     # First, a substantive turn (>=300 chars combined)
     big = "x" * 200
     mod._on_post_llm_call(
@@ -136,7 +137,7 @@ def test_substantive_gate_preserves_existing_tail_under_trivial_turn(fresh_plugi
     # Then a trivial turn — must NOT remove the tail. Use lengths that
     # pass the >=3 chars sanity gate but combined <300.
     mod._on_post_llm_call(
-        session_id="s2", user_message="oki doki", assistant_response="cool then",
+        session_id="s1", user_message="oki doki", assistant_response="cool then",
         conversation_history=[], platform="minecraft",
     )
     text_after = mc_path.read_text()
@@ -153,7 +154,7 @@ def test_pre_llm_call_injects_previous_session_context(fresh_plugin):
     user = "where is the cabin you built last week?" * 8
     asst = "the cabin's at -120, 64, 50 by the river — half-collapsed twice while i was figuring out roofs" * 4
     mod._on_post_llm_call(
-        session_id="s1", user_message=user, assistant_response=asst,
+        session_id="", user_message=user, assistant_response=asst,
         conversation_history=[], platform="minecraft",
     )
     # Now simulate a fresh session, first turn
@@ -260,6 +261,114 @@ def test_register_hooks(fresh_plugin):
     mod.register(FakeCtx())
     names = sorted(n for n, _ in registered)
     assert names == ["post_llm_call", "pre_llm_call"]
+
+
+# ---------------------------------------------------------------------------
+# _per_session_path tests (session-scoped handoff files, v1.1.2+)
+# ---------------------------------------------------------------------------
+
+def test_per_session_path_empty_session_id_returns_base(fresh_plugin, tmp_path):
+    """_per_session_path returns base_path unchanged when session_id is empty."""
+    mod, base = fresh_plugin
+    p = base / "state" / "DIALOGUE-HANDOFF.minecraft.md"
+    assert mod._per_session_path(p, "") is p
+
+
+def test_per_session_path_nonempty_inserts_slug(fresh_plugin, tmp_path):
+    """_per_session_path inserts session slug before the extension."""
+    mod, base = fresh_plugin
+    p = base / "state" / "DIALOGUE-HANDOFF.minecraft.md"
+    result = mod._per_session_path(p, "world")
+    assert result.name == "DIALOGUE-HANDOFF.minecraft.world.md"
+
+
+def test_per_session_path_none_base_returns_none(fresh_plugin):
+    """_per_session_path returns None when base_path is None."""
+    mod, _ = fresh_plugin
+    assert mod._per_session_path(None, "world") is None
+
+
+def test_per_session_path_long_session_id_truncated(fresh_plugin, tmp_path):
+    """Long session_id is slugified and truncated to 24 chars in the filename."""
+    mod, base = fresh_plugin
+    p = base / "state" / "DIALOGUE-HANDOFF.minecraft.md"
+    long_id = "a" * 40
+    result = mod._per_session_path(p, long_id)
+    # slug is the 24-char prefix of the lower-cased session_id
+    assert result.name == f"DIALOGUE-HANDOFF.minecraft.{'a' * 24}.md"
+
+
+def test_per_session_path_special_chars_sanitized(fresh_plugin, tmp_path):
+    """Special characters in session_id are replaced with hyphens."""
+    mod, base = fresh_plugin
+    p = base / "state" / "DIALOGUE-HANDOFF.minecraft.md"
+    result = mod._per_session_path(p, "world/nether")
+    assert result.name == "DIALOGUE-HANDOFF.minecraft.world-nether.md"
+
+
+def test_post_llm_call_two_sessions_write_different_files(fresh_plugin):
+    """Two post_llm_call invocations with different session_ids write to different files."""
+    mod, base = fresh_plugin
+    big = "x" * 200
+    mod._on_post_llm_call(
+        session_id="world",
+        user_message=big,
+        assistant_response=big,
+        conversation_history=[],
+        platform="minecraft",
+    )
+    mod._on_post_llm_call(
+        session_id="nether",
+        user_message=big,
+        assistant_response=big,
+        conversation_history=[],
+        platform="minecraft",
+    )
+    world_path = base / "state" / "DIALOGUE-HANDOFF.minecraft.world.md"
+    nether_path = base / "state" / "DIALOGUE-HANDOFF.minecraft.nether.md"
+    assert world_path.exists(), "world session file not created"
+    assert nether_path.exists(), "nether session file not created"
+    # Files should be independent
+    assert "session_id: world" in world_path.read_text()
+    assert "session_id: nether" in nether_path.read_text()
+
+
+def test_read_existing_tail_session_scoped(fresh_plugin):
+    """_read_existing_tail reads the session-scoped file and isolates sessions."""
+    mod, base = fresh_plugin
+    big = "x" * 200
+    # Write a substantive turn for session "alpha"
+    mod._on_post_llm_call(
+        session_id="alpha",
+        user_message=big,
+        assistant_response=big,
+        conversation_history=[],
+        platform="minecraft",
+    )
+    # Reading tail for "alpha" should return exchanges
+    tail_alpha = mod._read_existing_tail(platform="minecraft", session_id="alpha")
+    assert len(tail_alpha) > 0, "expected tail for session alpha"
+    # Reading tail for "beta" (no file) should return empty
+    tail_beta = mod._read_existing_tail(platform="minecraft", session_id="beta")
+    assert tail_beta == [], "expected empty tail for unknown session beta"
+
+
+def test_backward_compat_no_session_uses_platform_path(fresh_plugin):
+    """When session_id is empty, write path is just the platform path (no session suffix)."""
+    mod, base = fresh_plugin
+    big = "x" * 200
+    mod._on_post_llm_call(
+        session_id="",
+        user_message=big,
+        assistant_response=big,
+        conversation_history=[],
+        platform="minecraft",
+    )
+    expected = base / "state" / "DIALOGUE-HANDOFF.minecraft.md"
+    assert expected.exists(), "platform-scoped file should be written when session_id is empty"
+    # No session-suffixed file should exist
+    session_files = list((base / "state").glob("DIALOGUE-HANDOFF.minecraft.*.md"))
+    assert session_files == [], f"unexpected session-scoped files: {session_files}"
 
 
 def test_disabled_when_no_env(monkeypatch):
