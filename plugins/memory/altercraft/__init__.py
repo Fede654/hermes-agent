@@ -228,14 +228,41 @@ class AltercraftMemoryProvider(MemoryProvider):
                 "altercraft scene-graph migration skipped: %s", exc,
             )
 
-        # Register hooks if we have a real ctx (not during test discovery).
+        # Register hooks. During live sessions the ctx passed via register() is a
+        # _ProviderCollector whose register_hook is a no-op — hooks must be wired
+        # directly into the global plugin manager so invoke_hook() can find them.
+        hooks_registered = False
         if self._ctx is not None:
-            self._ctx.register_hook("transform_tool_result", self._on_perceive)
-            self._ctx.register_hook("transform_tool_result", self._on_action_result)
-            self._ctx.register_hook("pre_llm_call", self._inject_spatial_context)
+            try:
+                from hermes_cli.plugins import _manager as _pm
+                _pm._hooks.setdefault("transform_tool_result", []).append(self._on_perceive)
+                _pm._hooks.setdefault("transform_tool_result", []).append(self._on_action_result)
+                _pm._hooks.setdefault("pre_llm_call", []).append(self._inject_spatial_context)
+                hooks_registered = True
+                logger.debug("altercraft: hooks registered via global plugin manager")
+            except Exception as _he:
+                logger.debug("altercraft: global plugin manager unavailable (%s), falling back to ctx", _he)
+                self._ctx.register_hook("transform_tool_result", self._on_perceive)
+                self._ctx.register_hook("transform_tool_result", self._on_action_result)
+                self._ctx.register_hook("pre_llm_call", self._inject_spatial_context)
+                hooks_registered = True
+        if not hooks_registered:
+            logger.warning("altercraft: no hook registration path available")
 
     def shutdown(self) -> None:
-        # Nothing to flush — every write is atomic on its own.
+        # Deregister hooks from global plugin manager to avoid stale callbacks.
+        try:
+            from hermes_cli.plugins import _manager as _pm
+            for hook_name, cb in [
+                ("transform_tool_result", self._on_perceive),
+                ("transform_tool_result", self._on_action_result),
+                ("pre_llm_call", self._inject_spatial_context),
+            ]:
+                lst = _pm._hooks.get(hook_name, [])
+                if cb in lst:
+                    lst.remove(cb)
+        except Exception:
+            pass
         self._initialized = False
 
     # ── Context injection ────────────────────────────────────────────
