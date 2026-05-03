@@ -161,6 +161,7 @@ def consolidate_batch(
     persona: str,
     persona_id: int,
     dry_run: bool = False,
+    world: str = "altercraft",
 ) -> Dict[str, int]:
     """Process one batch of unconsolidated perceive episodes.
 
@@ -213,14 +214,14 @@ def consolidate_batch(
             f"Visited chunk ({cx},{cz}): {n} observations{health_str}{hostile_str}"
         )
 
-        episode_id = f"chunk_{cx}_{cz}_{persona}"
+        episode_id = f"chunk_{world}_{cx}_{cz}_{persona}"
 
         if not dry_run:
             try:
                 upsert_library_episode(
                     library_conn,
                     episode_id=episode_id,
-                    world="altercraft",
+                    world=world,
                     persona=persona,
                     kind="chunk_summary",
                     summary=summary,

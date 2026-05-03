@@ -511,22 +511,19 @@ class AltercraftMemoryProvider(MemoryProvider):
         try:
             from .world import connect, get_or_create_persona
             import time as _time
-            from uuid import uuid4
 
             conn = connect(self._persona)
             try:
                 pid = get_or_create_persona(conn, self._persona)
-                episode_id = str(uuid4())
                 detail = {
                     "label": data.get("label"),
                     "goal": data.get("goal"),
                     "duration_ms": data.get("duration_ms"),
                 }
                 conn.execute(
-                    "INSERT INTO episodes(id, ts, kind, body, detail, persona_id) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO episodes(ts, kind, body, detail, persona_id) "
+                    "VALUES (?, ?, ?, ?, ?)",
                     (
-                        episode_id,
                         _time.time(),
                         kind,
                         str(data.get("label") or ""),
@@ -536,8 +533,8 @@ class AltercraftMemoryProvider(MemoryProvider):
                 )
                 conn.commit()
                 logger.debug(
-                    "altercraft _on_action_result: inserted %s episode id=%s label=%s",
-                    kind, episode_id, data.get("label"),
+                    "altercraft _on_action_result: inserted %s episode label=%s",
+                    kind, data.get("label"),
                 )
             finally:
                 conn.close()

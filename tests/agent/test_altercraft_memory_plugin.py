@@ -556,6 +556,79 @@ class TestInjectNarrativeContext:
 # ─── Consolidate-batch tool tests ───────────────────────────────────────────
 
 
+class TestActionResultHook:
+    """_on_action_result persists construction/adventure episodes via mc_action_result."""
+
+    def _call_hook(self, plugin, tool_name: str, result_data: dict):
+        return plugin._on_action_result(
+            tool_name=tool_name,
+            args={},
+            result=json.dumps(result_data),
+            task_id="t1",
+            session_id="s1",
+            tool_call_id="tc1",
+            duration_ms=100,
+        )
+
+    def test_ignores_wrong_tool_name(self, plugin, tmp_hermes):
+        plugin.initialize("session", agent_identity="altercraft-clio")
+        # Any tool_name other than "mc_action_result" must be a no-op
+        result = self._call_hook(plugin, "mc_perceive", {"ok": True, "label": "place block"})
+        assert result is None
+
+    def test_ignores_failed_action(self, plugin, tmp_hermes):
+        plugin.initialize("session", agent_identity="altercraft-clio")
+        result = self._call_hook(plugin, "mc_action_result", {"ok": False, "label": "place block"})
+        assert result is None
+
+    def test_ignores_unknown_label(self, plugin, tmp_hermes):
+        plugin.initialize("session", agent_identity="altercraft-clio")
+        result = self._call_hook(plugin, "mc_action_result", {"ok": True, "label": "chat with villager"})
+        assert result is None
+
+    def test_construction_episode_persisted(self, plugin, tmp_hermes):
+        plugin.initialize("session", agent_identity="altercraft-clio")
+        self._call_hook(plugin, "mc_action_result", {
+            "ok": True, "label": "place oak_log", "goal": "build cabin", "duration_ms": 200,
+        })
+        import sqlite3
+        from plugins.memory.altercraft.world import world_db_path
+        conn = sqlite3.connect(str(world_db_path("clio")))
+        try:
+            rows = conn.execute(
+                "SELECT kind, body FROM episodes WHERE kind='construction'"
+            ).fetchall()
+        finally:
+            conn.close()
+        assert len(rows) == 1
+        assert "place oak_log" in rows[0][1]
+
+    def test_adventure_episode_persisted(self, plugin, tmp_hermes):
+        plugin.initialize("session", agent_identity="altercraft-clio")
+        self._call_hook(plugin, "mc_action_result", {
+            "ok": True, "label": "mine iron_ore", "goal": "gather resources", "duration_ms": 500,
+        })
+        import sqlite3
+        from plugins.memory.altercraft.world import world_db_path
+        conn = sqlite3.connect(str(world_db_path("clio")))
+        try:
+            rows = conn.execute(
+                "SELECT kind, body FROM episodes WHERE kind='adventure'"
+            ).fetchall()
+        finally:
+            conn.close()
+        assert len(rows) == 1
+        assert "mine iron_ore" in rows[0][1]
+
+    def test_returns_none_always(self, plugin, tmp_hermes):
+        """Hook must return None (no result mutation)."""
+        plugin.initialize("session", agent_identity="altercraft-clio")
+        result = self._call_hook(plugin, "mc_action_result", {
+            "ok": True, "label": "craft pickaxe",
+        })
+        assert result is None
+
+
 class TestConsolidateBatch:
     def test_consolidate_batch_in_tool_registry(self, plugin):
         names = {s["name"] for s in plugin.get_tool_schemas()}

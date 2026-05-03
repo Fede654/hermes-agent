@@ -49,8 +49,9 @@ def open_library(persona: str) -> sqlite3.Connection:
     try:
         path = library_path(persona)
         path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(path))
+        conn = sqlite3.connect(str(path), timeout=10)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
         library_schema(conn)
         return conn
     except Exception:
@@ -73,7 +74,7 @@ def library_schema(conn: sqlite3.Connection) -> None:
 
             CREATE TABLE IF NOT EXISTS library_episodes (
                 id INTEGER PRIMARY KEY,
-                episode_id TEXT NOT NULL,
+                episode_id TEXT NOT NULL UNIQUE,
                 world TEXT NOT NULL,
                 persona TEXT NOT NULL,
                 kind TEXT NOT NULL,
@@ -150,18 +151,30 @@ def search_library(
     query: str,
     persona: str,
     limit: int = 10,
+    world: str = None,
 ) -> list[dict]:
     """FTS5 full-text search. Returns list of {episode_id, kind, summary, tags, rank}."""
     try:
-        rows = conn.execute(
-            """SELECT le.episode_id, le.kind, le.summary, le.tags, fts.rank
-               FROM episodes_fts fts
-               JOIN library_episodes le ON fts.episode_id = le.episode_id
-               WHERE episodes_fts MATCH ? AND le.persona = ?
-               ORDER BY rank
-               LIMIT ?""",
-            (query, persona, limit),
-        ).fetchall()
+        if world is not None:
+            rows = conn.execute(
+                """SELECT le.episode_id, le.kind, le.summary, le.tags, fts.rank
+                   FROM episodes_fts fts
+                   JOIN library_episodes le ON fts.episode_id = le.episode_id
+                   WHERE episodes_fts MATCH ? AND le.persona = ? AND le.world = ?
+                   ORDER BY rank
+                   LIMIT ?""",
+                (query, persona, world, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT le.episode_id, le.kind, le.summary, le.tags, fts.rank
+                   FROM episodes_fts fts
+                   JOIN library_episodes le ON fts.episode_id = le.episode_id
+                   WHERE episodes_fts MATCH ? AND le.persona = ?
+                   ORDER BY rank
+                   LIMIT ?""",
+                (query, persona, limit),
+            ).fetchall()
         return [dict(r) for r in rows]
     except Exception:
         logger.warning("search_library failed query=%r", query, exc_info=True)
