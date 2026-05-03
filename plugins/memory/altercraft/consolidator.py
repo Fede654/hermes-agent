@@ -295,10 +295,88 @@ def run_consolidator(persona: str, dry_run: bool = False) -> Dict[str, int]:
                 pass
 
 
+# ─── Cron registration ────────────────────────────────────────────────────────
+
+
+def register_consolidator_cron_job(
+    persona: str,
+    schedule: str = "every 5 minutes",
+    deliver: str = "local",
+    model: Optional[str] = None,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Register (or replace) a Hermes cron job that runs the consolidator.
+
+    The job is stored in ``~/.hermes/cron/jobs.json`` and is picked up by the
+    gateway's background ticker (``cron.scheduler.tick()``) every 60 s.
+
+    The prompt instructs the cron agent to call ``run_consolidator`` via the
+    ``altercraft_memory`` toolset — no shell process is spawned; the agent
+    executes the consolidation inline.
+
+    Args:
+        persona:  Persona name (e.g. "clio").
+        schedule: Human-readable schedule string accepted by ``cron.jobs.parse_schedule``
+                  (e.g. "every 5 minutes", "every 1 hour", "0 */4 * * *").
+        deliver:  Delivery target for the job output (default: "local").
+        model:    Optional model override.
+        dry_run:  When True, remove any existing job with the same name and
+                  return a preview dict without writing to disk.
+
+    Returns:
+        The created (or preview) job dict.
+    """
+    from cron.jobs import create_job, load_jobs, save_jobs  # lazy: heavy import
+
+    job_name = f"altercraft-consolidator-{persona}"
+    prompt = (
+        f"Run the Altercraft episode consolidator for persona '{persona}'. "
+        "Call run_consolidator once, report how many episodes were processed "
+        "and consolidated, then stop. If there is nothing to consolidate, "
+        "respond with [SILENT]."
+    )
+
+    # Remove any existing job with the same name to avoid duplicates.
+    jobs = load_jobs()
+    existing_ids = [j["id"] for j in jobs if j.get("name") == job_name]
+    if existing_ids:
+        jobs = [j for j in jobs if j["id"] not in existing_ids]
+        if not dry_run:
+            save_jobs(jobs)
+        logger.info(
+            "register_consolidator_cron_job: removed %d existing job(s) named '%s'",
+            len(existing_ids),
+            job_name,
+        )
+
+    job = create_job(
+        prompt=prompt,
+        schedule=schedule,
+        name=job_name,
+        deliver=deliver,
+        model=model,
+        enabled_toolsets=["memory", "altercraft_memory"],
+    )
+
+    if not dry_run:
+        jobs = load_jobs()
+        jobs.append(job)
+        save_jobs(jobs)
+        logger.info(
+            "register_consolidator_cron_job: registered job '%s' (id=%s, schedule=%s)",
+            job_name,
+            job["id"],
+            schedule,
+        )
+
+    return job
+
+
 # ─── CLI entry point ──────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import argparse
+    import time
 
     logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser(description="Altercraft episode consolidator")
@@ -309,6 +387,55 @@ if __name__ == "__main__":
         default=False,
         help="Read-only: do not write to library or mark episodes",
     )
+    parser.add_argument(
+        "--loop",
+        action="store_true",
+        default=False,
+        help=(
+            "Run continuously, sleeping ALTERCRAFT_CONSOLIDATOR_INTERVAL seconds "
+            "between runs (default 300). Ctrl-C to stop."
+        ),
+    )
+    parser.add_argument(
+        "--register-cron",
+        action="store_true",
+        default=False,
+        help=(
+            "Register a Hermes cron job for this persona instead of running directly. "
+            "Use --schedule to set the interval (default: 'every 5 minutes')."
+        ),
+    )
+    parser.add_argument(
+        "--schedule",
+        default="every 5 minutes",
+        help="Schedule string for --register-cron (default: 'every 5 minutes')",
+    )
     args = parser.parse_args()
-    result = run_consolidator(args.persona, dry_run=args.dry_run)
-    print(result)
+
+    if args.register_cron:
+        job = register_consolidator_cron_job(
+            persona=args.persona,
+            schedule=args.schedule,
+            dry_run=args.dry_run,
+        )
+        print(json.dumps(job, indent=2, default=str))
+    elif args.loop:
+        interval = int(
+            __import__("os").environ.get("ALTERCRAFT_CONSOLIDATOR_INTERVAL", "300")
+        )
+        logger.info(
+            "Consolidator loop started for persona='%s', interval=%ds (dry_run=%s)",
+            args.persona,
+            interval,
+            args.dry_run,
+        )
+        try:
+            while True:
+                result = run_consolidator(args.persona, dry_run=args.dry_run)
+                logger.info("consolidator tick: %s", result)
+                time.sleep(interval)
+        except KeyboardInterrupt:
+            logger.info("Consolidator loop stopped.")
+    else:
+        result = run_consolidator(args.persona, dry_run=args.dry_run)
+        print(result)

@@ -1,5 +1,31 @@
 # Altercraft Consolidator — analytical profile for scene-graph consolidation
-# Runs consolidate_batch() on a schedule via hermes --profile altercraft-consolidator -z
+#
+# Two deployment modes:
+#
+# 1. Hermes cron job (recommended) — registers with the gateway's built-in
+#    background ticker (cron/scheduler.py tick() called every 60s):
+#
+#      python -m plugins.memory.altercraft.consolidator \
+#        --persona clio --register-cron --schedule "every 5 minutes"
+#
+#    The cron job is stored in ~/.hermes/cron/jobs.json and runs inside the
+#    gateway process via the AIAgent, so no extra sidecar is needed.
+#    Re-run the command to replace an existing job.
+#
+# 2. Standalone sidecar loop — run outside the gateway:
+#
+#      ALTERCRAFT_CONSOLIDATOR_INTERVAL=300 \
+#        python -m plugins.memory.altercraft.consolidator \
+#        --persona clio --loop
+#
+#    Useful for development / testing without a running gateway. Ctrl-C to stop.
+#    Set ALTERCRAFT_CONSOLIDATOR_INTERVAL (seconds) to change the tick interval.
+#
+# 3. One-shot (dry-run) — useful for debugging:
+#
+#      python -m plugins.memory.altercraft.consolidator \
+#        --persona clio --dry-run
+#
 profile:
   name: altercraft-consolidator
   description: "Promotes raw perceive episodes to consolidated library summaries"
