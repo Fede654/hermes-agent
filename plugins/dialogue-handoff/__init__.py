@@ -193,6 +193,24 @@ def _resolve_platform(provided: str) -> str:
     return provided
 
 
+def _per_session_path(base_path: Optional[Path], session_id: str) -> Optional[Path]:
+    """Derive a per-session handoff file by inserting a short session tag.
+
+    Only applies when session_id is non-empty; otherwise returns base_path
+    unchanged. This prevents gateway sessions (e.g. daemoncraft world session
+    vs DM session) from overwriting each other under the same platform file.
+
+    Example (base=DIALOGUE-HANDOFF.minecraft.md, session_id="world"):
+      → DIALOGUE-HANDOFF.minecraft.world.md
+    """
+    if base_path is None or not session_id:
+        return base_path
+    safe = re.sub(r"[^a-zA-Z0-9_-]+", "-", session_id.strip().lower())[:24]
+    stem = base_path.stem   # e.g. 'DIALOGUE-HANDOFF.minecraft'
+    ext = base_path.suffix or ".md"
+    return base_path.with_name(f"{stem}.{safe}{ext}")
+
+
 def _resolve_handoff_path(platform: str = "") -> Optional[Path]:
     """Resolve the handoff path for the given platform, with optional
     fallback to the legacy file when the per-platform file does not exist
@@ -447,11 +465,9 @@ def _format_recent_exchanges_block(exchanges: List[Dict[str, str]]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _read_existing_tail(platform: str = "") -> List[Dict[str, str]]:
-    """Read the Recent Exchanges tail from the per-platform handoff file.
-    Falls back to legacy file if HERMES_HANDOFF_FALLBACK_LEGACY=true and
-    the per-platform file does not exist yet."""
-    path = _resolve_handoff_path(platform)
+def _read_existing_tail(platform: str = "", session_id: str = "") -> List[Dict[str, str]]:
+    """Read the Recent Exchanges tail from the per-session (or per-platform) handoff file."""
+    path = _per_session_path(_resolve_handoff_path(platform), session_id)
     if not path or not path.exists():
         return []
     try:
@@ -490,8 +506,8 @@ def _on_post_llm_call(
         # v3.1: decide if this turn is substantive.
         sustantivo = _is_substantive(um, ar)
 
-        # Build/update the Recent Exchanges tail (per-platform).
-        tail = _read_existing_tail(platform=platform)
+        # Build/update the Recent Exchanges tail (per-session within platform).
+        tail = _read_existing_tail(platform=platform, session_id=session_id)
         if sustantivo:
             new_entry = {
                 "header": f"Exchange @ {now_iso} ({platform or 'cli'}, session {session_id or '?'})",
@@ -541,10 +557,12 @@ def _on_post_llm_call(
                 "",
             ]
 
-        # Write to per-platform handoff file. CLI / empty platform writes to
-        # the legacy DIALOGUE-HANDOFF.md path (back-compat); non-CLI platforms
-        # get their own file (DIALOGUE-HANDOFF.<platform>.md).
-        write_path = _per_platform_path(_HANDOFF_PATH, platform)
+        # Write to per-session handoff file when session_id is present
+        # (e.g. daemoncraft world vs DM sessions on the same profile/platform).
+        # Falls back to per-platform path for single-session contexts (CLI, Telegram).
+        write_path = _per_session_path(
+            _per_platform_path(_HANDOFF_PATH, platform), session_id
+        )
         if write_path is None:
             return
         write_path.parent.mkdir(parents=True, exist_ok=True)
