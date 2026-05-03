@@ -510,10 +510,11 @@ class TestInjectNarrativeContext:
 
         monkeypatch.setattr(_lib, "get_recent_library_episodes", lambda conn, persona, kind=None, limit=10: [])
 
-        msgs = self._make_messages()
-        result = plugin._inject_spatial_context(msgs, "s", "model", "platform")
+        result = plugin._inject_spatial_context(
+            session_id="s", model="model", platform="platform", is_first_turn=True
+        )
         assert result is not None
-        content = result["messages"][0]["content"]
+        content = result["context"]
         assert "<spatial_context>" in content
         assert "<narrative_context>" not in content
 
@@ -529,10 +530,11 @@ class TestInjectNarrativeContext:
         ]
         monkeypatch.setattr(_lib, "get_recent_library_episodes", lambda conn, persona, kind=None, limit=10: fake_episodes)
 
-        msgs = self._make_messages()
-        result = plugin._inject_spatial_context(msgs, "s", "model", "platform")
+        result = plugin._inject_spatial_context(
+            session_id="s", model="model", platform="platform", is_first_turn=True
+        )
         assert result is not None
-        content = result["messages"][0]["content"]
+        content = result["context"]
         assert "<narrative_context>" in content
         assert "slew the dragon" in content
         assert "built a castle" in content
@@ -548,8 +550,9 @@ class TestInjectNarrativeContext:
 
         monkeypatch.setattr(_lib, "get_recent_library_episodes", lambda conn, persona, kind=None, limit=10: [])
 
-        msgs = self._make_messages()
-        result = plugin._inject_spatial_context(msgs, "s", "model", "platform")
+        result = plugin._inject_spatial_context(
+            session_id="s", model="model", platform="platform", is_first_turn=True
+        )
         assert result is None
 
 

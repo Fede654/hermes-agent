@@ -433,8 +433,10 @@ class AltercraftMemoryProvider(MemoryProvider):
                     observed_by=pid,
                     salience=0.8,
                 )
+                # entities can be at data.nearby.entities or data.status.nearbyEntities
                 nearby = data.get("nearby") or {}
-                for ent in (nearby.get("entities") or [])[:8]:
+                nearby_entities = nearby.get("entities") or status.get("nearbyEntities") or []
+                for ent in nearby_entities[:8]:
                     ename = str(ent.get("name") or "unknown")
                     etype = "mob" if ename.lower() not in ("player",) else "player"
                     dist = float(ent.get("distance") or 0)
@@ -450,14 +452,15 @@ class AltercraftMemoryProvider(MemoryProvider):
                     )
                 import time as _time
                 conn.execute(
-                    "INSERT INTO episodes(ts, kind, body, detail, persona_id) "
-                    "VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO episodes(ts, kind, body, detail, persona_id, pos_x, pos_y, pos_z) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         _time.time(),
                         "perceive",
                         f"mc_perceive at ({round(bx)},{round(by)},{round(bz)})",
                         result[:1000],
                         pid,
+                        bx, by, bz,
                     ),
                 )
                 conn.commit()
@@ -520,15 +523,19 @@ class AltercraftMemoryProvider(MemoryProvider):
                     "goal": data.get("goal"),
                     "duration_ms": data.get("duration_ms"),
                 }
+                lp = self._last_position  # (x, y, z) or None
                 conn.execute(
-                    "INSERT INTO episodes(ts, kind, body, detail, persona_id) "
-                    "VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO episodes(ts, kind, body, detail, persona_id, pos_x, pos_y, pos_z) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         _time.time(),
                         kind,
                         str(data.get("label") or ""),
                         json.dumps(detail, sort_keys=True, default=str),
                         pid,
+                        lp[0] if lp else None,
+                        lp[1] if lp else None,
+                        lp[2] if lp else None,
                     ),
                 )
                 conn.commit()
@@ -544,14 +551,18 @@ class AltercraftMemoryProvider(MemoryProvider):
 
     def _inject_spatial_context(
         self,
-        messages: list,
         session_id: str,
         model: str,
         platform: str,
+        is_first_turn: bool = True,
         **kwargs,
     ) -> Optional[dict]:
-        """pre_llm_call: prepend spatial + narrative context on first turn of new session."""
-        if len(messages) > 1:
+        """pre_llm_call: return spatial + narrative context on the first turn.
+
+        The framework appends the returned {"context": str} value to the user
+        message. Never mutates the messages list directly.
+        """
+        if not is_first_turn:
             return None
         if not self._persona:
             return None
@@ -613,15 +624,7 @@ class AltercraftMemoryProvider(MemoryProvider):
         else:
             return None
 
-        msgs = [dict(m) for m in messages]
-        if msgs:
-            first = msgs[0]
-            content = first.get("content") or ""
-            if isinstance(content, list):
-                msgs[0] = {**first, "content": [{"type": "text", "text": combined}] + content}
-            else:
-                msgs[0] = {**first, "content": combined + str(content)}
-        return {"messages": msgs}
+        return {"context": combined}
 
     # ── SQL dual-write helpers (MVP) ─────────────────────────────────
 
