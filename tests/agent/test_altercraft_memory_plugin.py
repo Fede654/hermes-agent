@@ -486,3 +486,67 @@ class TestPersonaIsolationSQL:
         assert world_db_path("clio") != world_db_path("erato")
         assert world_db_path("clio").exists()
         assert world_db_path("erato").exists()
+
+
+# ─── Narrative context injection tests ─────────────────────────────────
+
+
+class TestInjectNarrativeContext:
+    """Tests for the narrative_context block injected by _inject_spatial_context."""
+
+    def _make_messages(self):
+        return [{"role": "user", "content": "hello"}]
+
+    def test_inject_spatial_context_with_empty_library(self, plugin, tmp_hermes, monkeypatch):
+        """When library has no episodes, only the spatial block is injected (if nodes present)."""
+        import plugins.memory.altercraft.library as _lib
+        plugin.initialize("session", agent_identity="altercraft-clio")
+        plugin._last_position = (100.0, 64.0, -50.0)
+        # Place a node near the position so spatial block fires
+        plugin.handle_tool_call("altercraft_remember_location", {
+            "name": "cabin", "x": 100, "y": 64, "z": -50,
+        })
+
+        monkeypatch.setattr(_lib, "get_recent_library_episodes", lambda conn, persona, kind=None, limit=10: [])
+
+        msgs = self._make_messages()
+        result = plugin._inject_spatial_context(msgs, "s", "model", "platform")
+        assert result is not None
+        content = result["messages"][0]["content"]
+        assert "<spatial_context>" in content
+        assert "<narrative_context>" not in content
+
+    def test_inject_narrative_context_with_library_episodes(self, plugin, tmp_hermes, monkeypatch):
+        """When library has episodes, the narrative block appears in injected content."""
+        import plugins.memory.altercraft.library as _lib
+        plugin.initialize("session", agent_identity="altercraft-clio")
+        plugin._last_position = None  # no position — only narrative
+
+        fake_episodes = [
+            {"kind": "adventure", "summary": "slew the dragon", "tags": "combat,dragon"},
+            {"kind": "construction", "summary": "built a castle", "tags": "build"},
+        ]
+        monkeypatch.setattr(_lib, "get_recent_library_episodes", lambda conn, persona, kind=None, limit=10: fake_episodes)
+
+        msgs = self._make_messages()
+        result = plugin._inject_spatial_context(msgs, "s", "model", "platform")
+        assert result is not None
+        content = result["messages"][0]["content"]
+        assert "<narrative_context>" in content
+        assert "slew the dragon" in content
+        assert "built a castle" in content
+        assert "<spatial_context>" not in content
+
+    def test_inject_returns_none_when_no_position_and_empty_library(
+        self, plugin, tmp_hermes, monkeypatch
+    ):
+        """Returns None when neither spatial nodes nor narrative episodes are available."""
+        import plugins.memory.altercraft.library as _lib
+        plugin.initialize("session", agent_identity="altercraft-clio")
+        plugin._last_position = None  # no position
+
+        monkeypatch.setattr(_lib, "get_recent_library_episodes", lambda conn, persona, kind=None, limit=10: [])
+
+        msgs = self._make_messages()
+        result = plugin._inject_spatial_context(msgs, "s", "model", "platform")
+        assert result is None

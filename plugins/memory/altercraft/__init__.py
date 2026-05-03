@@ -438,44 +438,78 @@ class AltercraftMemoryProvider(MemoryProvider):
         platform: str,
         **kwargs,
     ) -> Optional[dict]:
-        """pre_llm_call: prepend spatial context on first turn of new session."""
+        """pre_llm_call: prepend spatial + narrative context on first turn of new session."""
         if len(messages) > 1:
             return None
-        if not self._persona or self._last_position is None:
+        if not self._persona:
             return None
-        try:
-            x, y, z = self._last_position
-            from .world import connect, query_near
-            conn = connect(self._persona)
+
+        spatial_block: Optional[str] = None
+        narrative_block: Optional[str] = None
+
+        # ── Spatial block ────────────────────────────────────────────
+        if self._last_position is not None:
             try:
-                nodes = query_near(conn, x, y, z, radius=50, limit=12)
+                x, y, z = self._last_position
+                from .world import connect, query_near
+                conn = connect(self._persona)
+                try:
+                    nodes = query_near(conn, x, y, z, radius=50, limit=12)
+                finally:
+                    conn.close()
+                if nodes:
+                    lines = [
+                        f"## Nearby (last known position: x={round(x)} y={round(y)} z={round(z)})"
+                    ]
+                    for n in nodes:
+                        nx = round(n.get("pos_x") or 0)
+                        ny = round(n.get("pos_y") or 0)
+                        nz = round(n.get("pos_z") or 0)
+                        lines.append(
+                            f'- {n.get("type","?")} "{n.get("name","?")}" at ({nx},{ny},{nz})'
+                        )
+                    spatial_block = "<spatial_context>\n" + "\n".join(lines) + "\n</spatial_context>\n"
+            except Exception as exc:
+                logger.warning("altercraft _inject_spatial_context (spatial) failed: %s", exc)
+
+        # ── Narrative block ──────────────────────────────────────────
+        try:
+            from .library import open_library, get_recent_library_episodes
+            lib_conn = open_library(self._persona)
+            try:
+                episodes = get_recent_library_episodes(lib_conn, self._persona, limit=5)
             finally:
-                conn.close()
-            if not nodes:
-                return None
-            lines = [
-                f"## Nearby (last known position: x={round(x)} y={round(y)} z={round(z)})"
-            ]
-            for n in nodes:
-                nx = round(n.get("pos_x") or 0)
-                ny = round(n.get("pos_y") or 0)
-                nz = round(n.get("pos_z") or 0)
-                lines.append(
-                    f'- {n.get("type","?")} "{n.get("name","?")}" at ({nx},{ny},{nz})'
-                )
-            block = "<spatial_context>\n" + "\n".join(lines) + "\n</spatial_context>\n"
-            msgs = [dict(m) for m in messages]
-            if msgs:
-                first = msgs[0]
-                content = first.get("content") or ""
-                if isinstance(content, list):
-                    msgs[0] = {**first, "content": [{"type": "text", "text": block}] + content}
-                else:
-                    msgs[0] = {**first, "content": block + str(content)}
-            return {"messages": msgs}
+                lib_conn.close()
+            if episodes:
+                lines = ["## Recent Episodes"]
+                for ep in episodes:
+                    kind = ep.get("kind", "?")
+                    summary = ep.get("summary", "")
+                    tags = ep.get("tags", "")
+                    lines.append(f"- {kind}: {summary} [{tags}]")
+                narrative_block = "<narrative_context>\n" + "\n".join(lines) + "\n</narrative_context>\n"
         except Exception as exc:
-            logger.warning("altercraft _inject_spatial_context hook failed: %s", exc)
+            logger.warning("altercraft _inject_spatial_context (narrative) failed: %s", exc)
+
+        # ── Combine ──────────────────────────────────────────────────
+        if spatial_block and narrative_block:
+            combined = spatial_block + "\n" + narrative_block
+        elif spatial_block:
+            combined = spatial_block
+        elif narrative_block:
+            combined = narrative_block
+        else:
             return None
+
+        msgs = [dict(m) for m in messages]
+        if msgs:
+            first = msgs[0]
+            content = first.get("content") or ""
+            if isinstance(content, list):
+                msgs[0] = {**first, "content": [{"type": "text", "text": combined}] + content}
+            else:
+                msgs[0] = {**first, "content": combined + str(content)}
+        return {"messages": msgs}
 
     # ── SQL dual-write helpers (MVP) ─────────────────────────────────
 

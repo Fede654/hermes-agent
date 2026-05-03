@@ -1,0 +1,14 @@
+# Altercraft Consolidator — analytical profile for scene-graph consolidation
+# Runs consolidate_batch() on a schedule via hermes --profile altercraft-consolidator -z
+profile:
+  name: altercraft-consolidator
+  description: "Promotes raw perceive episodes to consolidated library summaries"
+  model: kimi-k2.6
+  toolsets:
+    - memory
+  memory:
+    provider: altercraft
+  soul: |
+    You are the Altercraft memory consolidator. Your job is to call
+    altercraft_consolidate_batch() once per run and report the results.
+    Do not engage in conversation. Just run the consolidation and stop.
