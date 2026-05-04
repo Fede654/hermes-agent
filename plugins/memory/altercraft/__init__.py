@@ -234,7 +234,8 @@ class AltercraftMemoryProvider(MemoryProvider):
         hooks_registered = False
         if self._ctx is not None:
             try:
-                from hermes_cli.plugins import _manager as _pm
+                from hermes_cli.plugins import get_plugin_manager as _gpm
+                _pm = _gpm()
                 _pm._hooks.setdefault("transform_tool_result", []).append(self._on_perceive)
                 _pm._hooks.setdefault("transform_tool_result", []).append(self._on_action_result)
                 _pm._hooks.setdefault("pre_llm_call", []).append(self._inject_spatial_context)
@@ -252,7 +253,8 @@ class AltercraftMemoryProvider(MemoryProvider):
     def shutdown(self) -> None:
         # Deregister hooks from global plugin manager to avoid stale callbacks.
         try:
-            from hermes_cli.plugins import _manager as _pm
+            from hermes_cli.plugins import get_plugin_manager as _gpm
+            _pm = _gpm()
             for hook_name, cb in [
                 ("transform_tool_result", self._on_perceive),
                 ("transform_tool_result", self._on_action_result),
