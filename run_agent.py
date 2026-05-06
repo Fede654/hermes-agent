@@ -6557,6 +6557,7 @@ class AIAgent:
 
         if not self._replace_primary_openai_client(reason="kimi_credential_refresh"):
             return False
+        self._sync_compressor_after_auth_refresh()
         return True
 
     def _try_refresh_kimi_client_credentials(self, *, force: bool = True) -> bool:
