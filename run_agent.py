@@ -6304,6 +6304,29 @@ class AIAgent:
             return terminal_response
         raise RuntimeError("Responses create(stream=True) fallback did not emit a terminal response.")
 
+    def _sync_compressor_after_auth_refresh(self) -> None:
+        """Propagate freshly-refreshed primary credentials to the context compressor.
+
+        The compressor maintains its own copy of api_key/base_url/provider.
+        Without this sync, a stale token survives in the compressor and causes
+        401 on context-compression summary generation.
+        """
+        cc = getattr(self, "context_compressor", None)
+        if cc is not None:
+            cc.update_model(
+                model=self.model,
+                context_length=cc.context_length,
+                base_url=self.base_url,
+                api_key=self.api_key,
+                provider=self.provider,
+                api_mode=self.api_mode,
+            )
+        rt = getattr(self, "_primary_runtime", None)
+        if rt is not None:
+            rt["compressor_api_key"] = self.api_key
+            rt["compressor_base_url"] = self.base_url
+            rt["compressor_provider"] = self.provider
+
     def _try_refresh_codex_client_credentials(self, *, force: bool = True) -> bool:
         if self.api_mode != "codex_responses" or self.provider != "openai-codex":
             return False
@@ -6331,6 +6354,7 @@ class AIAgent:
         if not self._replace_primary_openai_client(reason="codex_credential_refresh"):
             return False
 
+        self._sync_compressor_after_auth_refresh()
         return True
 
     def _try_refresh_nous_client_credentials(self, *, force: bool = True) -> bool:
@@ -6366,6 +6390,7 @@ class AIAgent:
         if not self._replace_primary_openai_client(reason="nous_credential_refresh"):
             return False
 
+        self._sync_compressor_after_auth_refresh()
         return True
 
     def _try_refresh_copilot_client_credentials(self) -> bool:
@@ -6400,6 +6425,7 @@ class AIAgent:
         if not self._replace_primary_openai_client(reason="copilot_credential_refresh"):
             return False
 
+        self._sync_compressor_after_auth_refresh()
         logger.info("Copilot credentials refreshed from %s", token_source)
 
     def _try_refresh_kimi_client_credentials(self, *, force: bool = True) -> bool:
@@ -6435,6 +6461,7 @@ class AIAgent:
 
         if not self._replace_primary_openai_client(reason="kimi_credential_refresh"):
             return False
+        self._sync_compressor_after_auth_refresh()
         return True
 
     def _try_refresh_anthropic_client_credentials(self) -> bool:
