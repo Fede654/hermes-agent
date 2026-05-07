@@ -49,6 +49,28 @@ def _build_agent(spec: dict[str, Any]) -> Any:
     return build_agent_for_research_job(spec)
 
 
+def _detect_resume(job_dir: Path) -> dict[str, Any] | None:
+    """HRM-93: surface checkpoint state to state.json so external observers
+    can tell that this invocation resumed instead of starting from zero.
+
+    The actual replay-skip happens inside ResearchSupervisor.run via
+    _load_checkpoint — we only mirror the headline numbers here.
+    """
+    cp_path = job_dir / "checkpoint.json"
+    if not cp_path.exists():
+        return None
+    try:
+        cp = json.loads(cp_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Could not parse checkpoint.json for resume: %s", exc)
+        return None
+    return {
+        "resumed_from_round": cp.get("round"),
+        "resumed_total_rounds": cp.get("total_rounds"),
+        "resumed_best_metric": cp.get("best_metric"),
+    }
+
+
 def main(spec_path: str) -> int:
     spec = json.loads(Path(spec_path).read_text())
     job_dir = Path(spec["job_dir"])
@@ -69,14 +91,25 @@ def main(spec_path: str) -> int:
         _setup_logging(job_dir)
         logger.info("Job %s starting", spec["job_id"])
 
-        _write_state(
-            job_dir,
+        resume = _detect_resume(job_dir)
+        if resume is not None:
+            logger.info(
+                "Job %s resuming from checkpoint: round=%s best=%s",
+                spec["job_id"],
+                resume.get("resumed_from_round"),
+                resume.get("resumed_best_metric"),
+            )
+
+        state_fields: dict[str, Any] = dict(
             job_id=spec["job_id"],
             status="running",
             pid=os.getpid(),
             started_at=time.time(),
             spec_path=spec_path,
         )
+        if resume is not None:
+            state_fields.update(resume)
+        _write_state(job_dir, **state_fields)
 
         try:
             agent = _build_agent(spec)

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time as _time
 from dataclasses import dataclass, field
@@ -391,6 +392,46 @@ def _make_lattice_comment_fn(
 
 
 # ---------------------------------------------------------------------------
+# Durable checkpoint helpers (HRM-93)
+# ---------------------------------------------------------------------------
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write text to path atomically: write to a sibling .tmp then rename."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _load_checkpoint(
+    checkpoint_dir: Path,
+) -> tuple[ExperimentHistory, int] | None:
+    """Read checkpoint.json + history.json from checkpoint_dir.
+
+    Returns (history, current_iteration) where current_iteration is the
+    last-completed round number (0 means baseline done; N means iteration N
+    done — the next iteration to run is N+1). Returns None if either file is
+    missing or parsing fails.
+    """
+    cp_path = checkpoint_dir / "checkpoint.json"
+    hist_path = checkpoint_dir / "history.json"
+    if not cp_path.exists() or not hist_path.exists():
+        return None
+    try:
+        cp = json.loads(cp_path.read_text(encoding="utf-8"))
+        hist_data = json.loads(hist_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Checkpoint load failed at %s: %s", checkpoint_dir, exc)
+        return None
+
+    history = ExperimentHistory.from_dict(hist_data)
+    round_value = cp.get("round")
+    if not isinstance(round_value, int):
+        return None
+    return history, round_value
+
+
+# ---------------------------------------------------------------------------
 # ResearchSupervisor
 # ---------------------------------------------------------------------------
 
@@ -498,15 +539,47 @@ class ResearchSupervisor:
             f"metric={spec.metric_key} topic={spec.topic[:50]}"
         )
 
-        # --- ACT (baseline) ---
-        baseline = runner.run_experiment(initial_attempt, run_id=run_id, iteration=0)
-        # Read on-disk artifact — worker may have modified the seed during baseline
-        baseline_artifact = self._read_artifact(spec, run_dir, baseline) or initial_attempt
-        attempt_holder[0] = baseline_artifact
-        best_artifact_holder: list[str] = [baseline_artifact]
-        # --- OBSERVE ---
-        self._observe(baseline, spec, run_dir)
-        self._checkpoint(runner.history, checkpoint_dir, round=0)
+        # --- HRM-93: durable resume ---
+        # If checkpoint.json + history.json exist on disk, replay-skip every
+        # round already completed. The baseline (round=0) and any subsequent
+        # rounds up to checkpoint["round"] are not re-executed.
+        start_iteration = 1
+        best_artifact_holder: list[str] = [initial_attempt]
+        loaded = _load_checkpoint(checkpoint_dir) if checkpoint_dir else None
+        if loaded is not None:
+            resumed_history, last_round = loaded
+            runner.history = resumed_history
+            start_iteration = last_round + 1
+            if resumed_history.best_result is not None:
+                best_artifact = (
+                    self._read_artifact(spec, run_dir, resumed_history.best_result)
+                    or resumed_history.best_result.code
+                    or initial_attempt
+                )
+            else:
+                best_artifact = initial_attempt
+            best_artifact_holder = [best_artifact]
+            last = resumed_history.results[-1] if resumed_history.results else None
+            if last is not None:
+                attempt_holder[0] = (
+                    self._read_artifact(spec, run_dir, last)
+                    or last.code
+                    or initial_attempt
+                )
+            lattice_comment_fn(
+                f"Resuming from checkpoint: round={last_round} "
+                f"best={resumed_history.best_result.primary_metric if resumed_history.best_result else None}"
+            )
+        else:
+            # --- ACT (baseline) ---
+            baseline = runner.run_experiment(initial_attempt, run_id=run_id, iteration=0)
+            # Read on-disk artifact — worker may have modified the seed during baseline
+            baseline_artifact = self._read_artifact(spec, run_dir, baseline) or initial_attempt
+            attempt_holder[0] = baseline_artifact
+            best_artifact_holder = [baseline_artifact]
+            # --- OBSERVE ---
+            self._observe(baseline, spec, run_dir)
+            self._checkpoint(runner.history, checkpoint_dir, round=0)
 
         if llm is None:
             lattice_comment_fn(f"Baseline only. best={runner.history.baseline_metric}")
@@ -538,7 +611,7 @@ class ResearchSupervisor:
 
         # Autogenesis AOOR improvement loop
         no_improvement = 0
-        for iteration in range(1, max_iterations + 1):
+        for iteration in range(start_iteration, max_iterations + 1):
             # OPTIMIZE — propose revised attempt (SEPL: propose)
             next_attempt = self._improve_attempt(llm, spec, attempt_holder[0], runner.history)
             attempt_holder[0] = next_attempt
@@ -817,49 +890,37 @@ class ResearchSupervisor:
 
         Called after baseline and every completed iteration so that external
         monitors (e.g. research_job_tool) can read progress without polling
-        the running process.
+        the running process AND so that a restarted job_runner can resume
+        instead of replaying baseline + completed rounds (HRM-93).
+
+        history.json carries the full-fidelity dataclass dump (round-trips
+        through ExperimentHistory.from_dict) plus a "best" alias of
+        "best_result" for the legacy schema consumed by research_job_tool.
+        Both files are written atomically: tempfile + os.replace.
         """
         if checkpoint_dir is None:
             return
 
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-        # Serialize results
-        results = []
-        for r in history.results:
-            results.append({
-                "run_id": r.run_id,
-                "iteration": r.iteration,
-                "metrics": r.metrics,
-                "primary_metric": r.primary_metric,
-                "improved": r.improved,
-                "kept": r.kept,
-                "elapsed_sec": r.elapsed_sec,
-                "error": r.error,
-            })
+        history_data = history.to_dict()
+        # Legacy alias used by tools/research_job_tool.py (_action_status,
+        # _action_resume) which reads history["best"]["primary_metric"].
+        history_data["best"] = history_data.get("best_result")
 
-        best = None
-        if history.best_result:
-            br = history.best_result
-            best = {
-                "run_id": br.run_id,
-                "iteration": br.iteration,
-                "primary_metric": br.primary_metric,
-                "metrics": br.metrics,
-            }
-
-        checkpoint_dir.joinpath("history.json").write_text(
-            json.dumps({"results": results, "best": best}, indent=2)
+        _atomic_write_text(
+            checkpoint_dir / "history.json",
+            json.dumps(history_data, indent=2),
         )
 
-        # Lightweight status file for quick polling
-        checkpoint_dir.joinpath("checkpoint.json").write_text(
+        _atomic_write_text(
+            checkpoint_dir / "checkpoint.json",
             json.dumps({
                 "round": round,
                 "total_rounds": len(history.results),
                 "best_metric": history.best_result.primary_metric if history.best_result else None,
                 "updated_at": _time.time(),
-            }, indent=2)
+            }, indent=2),
         )
 
         logger.debug("[checkpoint] round=%d dir=%s", round, checkpoint_dir)
