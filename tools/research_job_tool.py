@@ -134,6 +134,14 @@ RESEARCH_JOB_SCHEMA = {
                 "type": "string",
                 "description": "Optional starting scaffold for the worker.",
             },
+            "acceptance_criterion": {
+                "type": "string",
+                "description": "Optional acceptance criterion (e.g. pass_rate >= 0.95).",
+            },
+            "timeout_sec": {
+                "type": "integer",
+                "description": "Wall-clock timeout for the entire job in seconds. Default: 0 (unlimited).",
+            },
         },
         "required": ["action"],
     },
@@ -168,6 +176,8 @@ def _action_start(args: dict[str, Any]) -> str:
         "time_budget_sec": args.get("time_budget_sec", 0),
         "lattice_task_id": args.get("lattice_task_id"),
         "initial_attempt": args.get("initial_attempt", ""),
+        "acceptance_criterion": args.get("acceptance_criterion", ""),
+        "timeout_sec": args.get("timeout_sec", 0),
         "model": cfg.get("model"),
         "provider": cfg.get("provider"),
         "base_url": cfg.get("base_url"),
@@ -364,6 +374,8 @@ def research_job(
     time_budget_sec: int = 0,
     lattice_task_id: str = "",
     initial_attempt: str = "",
+    acceptance_criterion: str = "",
+    timeout_sec: int = 0,
     **_: Any,
 ) -> str:
     if action == "start":
