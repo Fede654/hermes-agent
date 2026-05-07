@@ -551,6 +551,61 @@ class DaemonCraftAdapter(BasePlatformAdapter):
 
         return "context"
 
+    async def _maybe_mutate_plan_from_chat(self, player_message: str) -> None:
+        """DC-107: Auto-create plan when player asks for something actionable.
+
+        If no active plan exists and the player's message contains actionable
+        keywords, create a plan goal directly via the bot server so the loop
+        can execute it on the next heartbeat.
+        """
+        try:
+            # Fetch current plan
+            async with self._session.post(
+                f"{self._bot_api_url}/action/plan",
+                json={"action": "get_plan"},
+            ) as resp:
+                plan = await resp.json() if resp.status < 400 else {}
+
+            # If plan already has a goal, don't overwrite
+            if plan.get("goal"):
+                return
+
+            # Simple heuristic: detect actionable intent in player message
+            msg_lower = player_message.lower()
+            action_keywords = [
+                "build", "make", "craft", "gather", "collect", "mine", "get",
+                "go to", "go ", "find", "kill", "attack", "defend", "protect",
+                "plant", "harvest", "farm", "cook", "smelt", "enchant",
+                "explore", "dig", "place", "build me", "make me", "can you",
+                "please", "help me", "need", "want", "bring", "fetch",
+                "create", "construct", "destroy", "remove", "clear",
+            ]
+            if not any(kw in msg_lower for kw in action_keywords):
+                return
+
+            # Sanitize goal text
+            goal = player_message.strip()
+            if len(goal) > 200:
+                goal = goal[:200] + "..."
+
+            epoch = plan.get("epoch", 0)
+            async with self._session.post(
+                f"{self._bot_api_url}/action/plan",
+                json={
+                    "action": "set_goal",
+                    "goal": goal,
+                    "tasks": [],
+                    "expected_epoch": epoch,
+                },
+            ) as resp:
+                if resp.status < 400:
+                    logger.info("[DaemonCraft] Auto-created plan from chat: %s", goal)
+                else:
+                    body = await resp.text()
+                    logger.warning("[DaemonCraft] Plan mutation failed: %s", body)
+        except Exception as e:
+            logger.warning("[DaemonCraft] Plan mutation check failed: %s", e)
+
     async def _inject_synthetic_perceive(self, data: dict) -> None:
         """Inject a fake assistant tool_call + tool result into the world session."""
         if not self._session_store:
@@ -671,6 +726,10 @@ class DaemonCraftAdapter(BasePlatformAdapter):
         )
 
         await self.handle_message(event)
+
+        # DC-107: If the player asked for something actionable and no plan exists,
+        # auto-create a plan so the loop can execute it on next heartbeat.
+        await self._maybe_mutate_plan_from_chat(text)
 
     # ------------------------------------------------------------------
     # Outbound
