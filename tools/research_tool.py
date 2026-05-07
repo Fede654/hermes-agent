@@ -216,6 +216,25 @@ def run_research(
         m = re.search(r"NOTES:\s*(.+)", best.stdout)
         best_notes = m.group(1).strip() if m else ""
 
+    # Aggregate cost accounting across iterations
+    iteration_costs = []
+    total_tokens_in = 0
+    total_tokens_out = 0
+    total_cost_usd = 0.0
+    for r in history.results:
+        iteration_costs.append({
+            "iteration": r.iteration,
+            "tokens_in": r.tokens_in,
+            "tokens_out": r.tokens_out,
+            "cost_usd": round(r.cost_usd, 6),
+            "primary_metric": r.primary_metric,
+            "improved": r.improved,
+            "kept": r.kept,
+        })
+        total_tokens_in += r.tokens_in
+        total_tokens_out += r.tokens_out
+        total_cost_usd += r.cost_usd
+
     return json.dumps({
         "run_id": run_id,
         "iterations": len(history.results),
@@ -225,6 +244,11 @@ def run_research(
         "best_notes": best_notes,
         "workspace": str(workspace / run_id),
         "learnings_file": str(workspace / run_id / "learnings.jsonl"),
+        "iteration_costs": iteration_costs,
+        "total_tokens_in": total_tokens_in,
+        "total_tokens_out": total_tokens_out,
+        "total_cost_usd": round(total_cost_usd, 6),
+        "total_iterations": len(history.results),
     }, indent=2)
 
 

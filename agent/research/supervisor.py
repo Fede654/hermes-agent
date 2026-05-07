@@ -888,6 +888,12 @@ class ResearchSupervisor:
         completed = status == "completed"
         error: str | None = None if completed else (first.get("error") or f"Worker status: {status}")
 
+        # Extract token / cost data from delegate_task result (best-effort)
+        _tokens = first.get("tokens") or {}
+        _tokens_in = int(_tokens.get("input", 0)) if isinstance(_tokens.get("input"), (int, float)) else 0
+        _tokens_out = int(_tokens.get("output", 0)) if isinstance(_tokens.get("output"), (int, float)) else 0
+        _cost_usd = float(first.get("_child_cost_usd", 0.0)) if isinstance(first.get("_child_cost_usd"), (int, float)) else 0.0
+
         return DelegateSandboxResult(
             metrics=metrics,
             stdout=summary,
@@ -896,6 +902,9 @@ class ResearchSupervisor:
             timed_out=False,
             returncode=0 if completed else 1,
             error=error,
+            tokens_in=_tokens_in,
+            tokens_out=_tokens_out,
+            cost_usd=_cost_usd,
         )
 
     # ------------------------------------------------------------------

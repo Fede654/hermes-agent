@@ -40,6 +40,9 @@ class DelegateSandboxResult:
     timed_out: bool = False
     returncode: int = 0
     error: Optional[str] = None
+    tokens_in: int = 0
+    tokens_out: int = 0
+    cost_usd: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -55,6 +58,9 @@ class ExperimentResult:
     stdout: str
     stderr: str
     error: str | None = None
+    tokens_in: int = 0
+    tokens_out: int = 0
+    cost_usd: float = 0.0
 
 
 @dataclass
@@ -208,6 +214,9 @@ class ExperimentRunner:
             stdout=sandbox_result.stdout,
             stderr=sandbox_result.stderr,
             error=error,
+            tokens_in=sandbox_result.tokens_in,
+            tokens_out=sandbox_result.tokens_out,
+            cost_usd=sandbox_result.cost_usd,
         )
 
         if kept:
@@ -385,6 +394,10 @@ def _result_from_dict(data: dict[str, object]) -> ExperimentResult | None:
     typed_metrics: dict[str, object] = {}
     for key, value in cast(dict[object, object], metrics).items():
         typed_metrics[str(key)] = value
+
+    _tokens_in = data.get("tokens_in", 0)
+    _tokens_out = data.get("tokens_out", 0)
+    _cost_usd = data.get("cost_usd", 0.0)
     return ExperimentResult(
         run_id=run_id,
         iteration=iteration,
@@ -399,4 +412,7 @@ def _result_from_dict(data: dict[str, object]) -> ExperimentResult | None:
         stdout=stdout,
         stderr=stderr,
         error=error,
+        tokens_in=int(_tokens_in) if isinstance(_tokens_in, (int, float)) else 0,
+        tokens_out=int(_tokens_out) if isinstance(_tokens_out, (int, float)) else 0,
+        cost_usd=float(_cost_usd) if isinstance(_cost_usd, (int, float)) else 0.0,
     )
