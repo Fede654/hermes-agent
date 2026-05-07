@@ -17,6 +17,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+# Re-exported so callers (research_job_tool, status probes, tests) have a
+# single import surface for "is there something to resume here?". The real
+# logic lives in supervisor._detect_resume — see the docstring there for
+# the consistency-vs-probe distinction.
+from agent.research.supervisor import _detect_resume  # noqa: F401
+
 logger = logging.getLogger(__name__)
 
 

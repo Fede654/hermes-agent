@@ -98,6 +98,19 @@ def _make_result(iteration: int, metric: float, run_id: str = "rid") -> Experime
     )
 
 
+def _write_snapshot_stub(checkpoint_dir: Path, iteration: int) -> None:
+    """Write a minimal snapshots/iter-{N}.json so _load_checkpoint's
+    consistency check accepts the resume."""
+    snap_dir = checkpoint_dir / "snapshots"
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    (snap_dir / f"iter-{iteration}.json").write_text(json.dumps({
+        "iteration": iteration,
+        "messages": [],
+        "metrics": {},
+        "files": [],
+    }))
+
+
 # ---------------------------------------------------------------------------
 # Atomic write
 # ---------------------------------------------------------------------------
@@ -147,6 +160,7 @@ class TestLoadCheckpoint:
             "best_metric": 0.7,
             "updated_at": 0,
         }))
+        _write_snapshot_stub(tmp_path, 1)
 
         loaded = _load_checkpoint(tmp_path)
         assert loaded is not None
@@ -155,6 +169,69 @@ class TestLoadCheckpoint:
         assert len(loaded_history.results) == 2
         assert loaded_history.best_result is not None
         assert loaded_history.best_result.primary_metric == pytest.approx(0.7)
+
+
+class TestLoadCheckpointConsistency:
+    """Fix-2: cross-file consistency between checkpoint.json, history.json,
+    and snapshots/iter-{N}.json. A crash mid-write must not produce a
+    silent resume that skips a round."""
+
+    def test_returns_none_when_history_shorter_than_round(self, tmp_path: Path):
+        # checkpoint claims round=2 (3 iterations completed) but history
+        # only contains 1 result. Resuming would silently skip rounds.
+        history = ExperimentHistory()
+        history.add(_make_result(0, 0.5))
+        (tmp_path / "history.json").write_text(json.dumps(history.to_dict()))
+        (tmp_path / "checkpoint.json").write_text(json.dumps({
+            "round": 2, "total_rounds": 3, "best_metric": 0.5, "updated_at": 0,
+        }))
+        _write_snapshot_stub(tmp_path, 2)
+
+        assert _load_checkpoint(tmp_path) is None
+
+    def test_returns_none_when_history_longer_than_round(self, tmp_path: Path):
+        # Symmetric mismatch: history has 3 results but checkpoint says
+        # round=1. Either checkpoint.json or history.json was clobbered.
+        history = ExperimentHistory()
+        for i in range(3):
+            history.add(_make_result(i, 0.1 * (i + 1)))
+        (tmp_path / "history.json").write_text(json.dumps(history.to_dict()))
+        (tmp_path / "checkpoint.json").write_text(json.dumps({
+            "round": 1, "total_rounds": 3, "best_metric": 0.3, "updated_at": 0,
+        }))
+        _write_snapshot_stub(tmp_path, 1)
+
+        assert _load_checkpoint(tmp_path) is None
+
+    def test_returns_none_when_snapshot_missing(self, tmp_path: Path):
+        history = ExperimentHistory()
+        history.add(_make_result(0, 0.4))
+        history.add(_make_result(1, 0.6))
+        history.add(_make_result(2, 0.8))
+        (tmp_path / "history.json").write_text(json.dumps(history.to_dict()))
+        (tmp_path / "checkpoint.json").write_text(json.dumps({
+            "round": 2, "total_rounds": 3, "best_metric": 0.8, "updated_at": 0,
+        }))
+        # Note: no _write_snapshot_stub call → iter-2.json is absent.
+        assert _load_checkpoint(tmp_path) is None
+
+    def test_returns_state_when_all_consistent(self, tmp_path: Path):
+        history = ExperimentHistory()
+        history.add(_make_result(0, 0.4))
+        history.add(_make_result(1, 0.6))
+        history.add(_make_result(2, 0.8))
+        history.best_result = history.results[-1]
+        (tmp_path / "history.json").write_text(json.dumps(history.to_dict()))
+        (tmp_path / "checkpoint.json").write_text(json.dumps({
+            "round": 2, "total_rounds": 3, "best_metric": 0.8, "updated_at": 0,
+        }))
+        _write_snapshot_stub(tmp_path, 2)
+
+        loaded = _load_checkpoint(tmp_path)
+        assert loaded is not None
+        loaded_history, current_iteration = loaded
+        assert current_iteration == 2
+        assert len(loaded_history.results) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +257,7 @@ class TestResumeFromCheckpoint:
         (checkpoint_dir / "checkpoint.json").write_text(json.dumps({
             "round": 0, "total_rounds": 1, "best_metric": 0.42, "updated_at": 0,
         }))
+        _write_snapshot_stub(checkpoint_dir, 0)
 
         with patch(
             "tools.delegate_tool.delegate_task",
@@ -220,6 +298,7 @@ class TestResumeFromCheckpoint:
         (checkpoint_dir / "checkpoint.json").write_text(json.dumps({
             "round": 2, "total_rounds": 3, "best_metric": 0.3, "updated_at": 0,
         }))
+        _write_snapshot_stub(checkpoint_dir, 2)
 
         # Stub the LLM so iterations 3..5 run
         llm = MagicMock()

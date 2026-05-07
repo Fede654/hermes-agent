@@ -412,6 +412,22 @@ def _load_checkpoint(
     last-completed round number (0 means baseline done; N means iteration N
     done — the next iteration to run is N+1). Returns None if either file is
     missing or parsing fails.
+
+    Cross-file consistency (peer-review Fix-2): a crash between writing
+    history.json and checkpoint.json (or between writing snapshots and
+    checkpoint.json) leaves these three artifacts out of sync. Resuming
+    from inconsistent state produces silent data corruption — e.g.
+    skipping a round that was never actually run. We reject any of:
+
+      * checkpoint["round"] != len(history.results) - 1
+        (the latest history entry must be the round the checkpoint
+        claims is complete; round N done ⇒ history has N+1 results,
+        indexed 0..N).
+      * snapshots/iter-{N}.json missing for the claimed round.
+
+    On mismatch we log a warning and return None — the loop falls back
+    to a clean restart, which is safer than resuming from a corrupted
+    state.
     """
     cp_path = checkpoint_dir / "checkpoint.json"
     hist_path = checkpoint_dir / "history.json"
@@ -428,7 +444,53 @@ def _load_checkpoint(
     round_value = cp.get("round")
     if not isinstance(round_value, int):
         return None
+
+    expected_results = round_value + 1
+    if len(history.results) != expected_results:
+        logger.warning(
+            "Checkpoint inconsistent at %s: round=%d implies %d results "
+            "but history.json has %d. Falling back to full restart.",
+            checkpoint_dir, round_value, expected_results, len(history.results),
+        )
+        return None
+
+    snapshot_path = checkpoint_dir / "snapshots" / f"iter-{round_value}.json"
+    if not snapshot_path.exists():
+        logger.warning(
+            "Checkpoint inconsistent at %s: round=%d but %s is missing. "
+            "Falling back to full restart.",
+            checkpoint_dir, round_value, snapshot_path.name,
+        )
+        return None
+
     return history, round_value
+
+
+def _detect_resume(checkpoint_dir: Path) -> dict[str, Any] | None:
+    """Lightweight resume probe used by job_runner / status tools.
+
+    Returns a small dict surfacing checkpoint metadata (round, total
+    rounds, best metric) or None when no usable checkpoint exists. This
+    is intentionally weaker than ``_load_checkpoint``: it only reads
+    checkpoint.json and does not enforce cross-file consistency, so
+    operators can see *something happened* even when history.json is
+    corrupt or missing. The resume path itself goes through
+    _load_checkpoint, which does enforce consistency.
+    """
+    cp_path = Path(checkpoint_dir) / "checkpoint.json"
+    if not cp_path.exists():
+        return None
+    try:
+        cp = json.loads(cp_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(cp, dict) or not isinstance(cp.get("round"), int):
+        return None
+    return {
+        "resumed_from_round": cp["round"],
+        "resumed_total_rounds": cp.get("total_rounds"),
+        "resumed_best_metric": cp.get("best_metric"),
+    }
 
 
 def restore_snapshot(snapshot_path: Path, target_dir: Path) -> None:
