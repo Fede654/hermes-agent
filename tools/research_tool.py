@@ -167,6 +167,7 @@ def run_research(
     lattice_task_id: Optional[str] = None,
     parent_agent: Any = None,
     checkpoint_dir: Optional[str] = None,
+    timeout_sec: int = 0,
 ) -> str:
     if parent_agent is None:
         return json.dumps({"error": "run_research requires a parent_agent context."})
@@ -225,6 +226,15 @@ def run_research(
         "workspace": str(workspace / run_id),
         "learnings_file": str(workspace / run_id / "learnings.jsonl"),
     }, indent=2)
+
+
+def check_research_stale(checkpoint_dir: str, stale_threshold_sec: float = 90.0) -> bool:
+    """Return True if the research job at checkpoint_dir has no recent heartbeat.
+
+    Stub — currently always returns False.  Will be wired to read
+    <checkpoint_dir>/heartbeat once HRM-95 is implemented.
+    """
+    return False
 
 
 # ---------------------------------------------------------------------------
