@@ -392,7 +392,7 @@ def _make_lattice_comment_fn(
 
 
 # ---------------------------------------------------------------------------
-# Durable checkpoint helpers (HRM-93)
+# Durable checkpoint + snapshot helpers (HRM-93, HRM-96)
 # ---------------------------------------------------------------------------
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -429,6 +429,36 @@ def _load_checkpoint(
     if not isinstance(round_value, int):
         return None
     return history, round_value
+
+
+def restore_snapshot(snapshot_path: Path, target_dir: Path) -> None:
+    """Rewrite every captured file from a snapshot into target_dir.
+
+    Snapshot schema (see ResearchSupervisor._snapshot):
+        {"iteration": int, "messages": [...], "metrics": {...},
+         "files": [{"path": "<relpath>", "content": "<text>"}, ...]}
+
+    Raises ValueError if any captured path would escape target_dir.
+    """
+    data = json.loads(Path(snapshot_path).read_text(encoding="utf-8"))
+    target_dir = Path(target_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_resolved = target_dir.resolve()
+
+    for entry in data.get("files", []):
+        rel = entry.get("path")
+        content = entry.get("content", "")
+        if not isinstance(rel, str) or not isinstance(content, str):
+            continue
+        dest = (target_dir / rel).resolve()
+        try:
+            dest.relative_to(target_resolved)
+        except ValueError:
+            raise ValueError(
+                f"snapshot path escapes target_dir: {rel!r}"
+            ) from None
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content, encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -580,6 +610,7 @@ class ResearchSupervisor:
             # --- OBSERVE ---
             self._observe(baseline, spec, run_dir)
             self._checkpoint(runner.history, checkpoint_dir, round=0)
+            self._snapshot(runner.history, checkpoint_dir, run_dir, iteration=0, result=baseline)
 
         if llm is None:
             lattice_comment_fn(f"Baseline only. best={runner.history.baseline_metric}")
@@ -626,6 +657,7 @@ class ResearchSupervisor:
             # OBSERVE + REMEMBER — extract and persist structured learning
             self._observe(result, spec, run_dir)
             self._checkpoint(runner.history, checkpoint_dir, round=iteration)
+            self._snapshot(runner.history, checkpoint_dir, run_dir, iteration=iteration, result=result)
 
             # SEPL: evaluate → keep/discard (handled by ExperimentRunner)
             # SEPL: rollback — restore best on-disk artifact, not the seed string
@@ -924,6 +956,63 @@ class ResearchSupervisor:
         )
 
         logger.debug("[checkpoint] round=%d dir=%s", round, checkpoint_dir)
+
+    # ------------------------------------------------------------------
+    # HRM-96: Atomic per-iteration workspace snapshot
+    # ------------------------------------------------------------------
+
+    def _snapshot(
+        self,
+        history: ExperimentHistory,
+        checkpoint_dir: Path | None,
+        run_dir: Path,
+        *,
+        iteration: int,
+        result: ExperimentResult,
+    ) -> None:
+        """Capture iteration state to <checkpoint_dir>/snapshots/iter-{N}.json.
+
+        Captures:
+          - iteration         (int)
+          - messages          (list of full ExperimentResult dicts up to N)
+          - metrics           (dict — current iteration's metrics)
+          - files             (list of {path, content} for the round dir)
+
+        File paths are stored relative to run_dir so restore_snapshot() can
+        rewrite them back into any workspace root. Atomic write via tempfile
+        + os.replace; partial writes never appear at the published path.
+        """
+        if checkpoint_dir is None:
+            return
+
+        snapshots_dir = checkpoint_dir / "snapshots"
+        snapshots_dir.mkdir(parents=True, exist_ok=True)
+
+        round_dir = run_dir / f"round-{result.run_id}-iter{iteration}"
+        files: list[dict[str, str]] = []
+        if round_dir.exists():
+            for f in sorted(round_dir.rglob("*")):
+                if not f.is_file():
+                    continue
+                try:
+                    content = f.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    continue
+                rel = f.relative_to(run_dir).as_posix()
+                files.append({"path": rel, "content": content})
+
+        history_data = history.to_dict()
+        snapshot = {
+            "iteration": iteration,
+            "messages": history_data.get("results", []),
+            "metrics": dict(result.metrics),
+            "files": files,
+        }
+        _atomic_write_text(
+            snapshots_dir / f"iter-{iteration}.json",
+            json.dumps(snapshot, indent=2),
+        )
+        logger.debug("[snapshot] iter=%d files=%d", iteration, len(files))
 
     # ------------------------------------------------------------------
     # Autogenesis: Reflect (SEPL reflection optimizer on early stop)
