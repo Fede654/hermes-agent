@@ -231,10 +231,28 @@ def run_research(
 def check_research_stale(checkpoint_dir: str, stale_threshold_sec: float = 90.0) -> bool:
     """Return True if the research job at checkpoint_dir has no recent heartbeat.
 
-    Stub — currently always returns False.  Will be wired to read
-    <checkpoint_dir>/heartbeat once HRM-95 is implemented.
+    The heartbeat file is ``<checkpoint_dir>/heartbeat.json``, written by
+    ``agent.research.job_runner._child_main`` every 30 s with the schema
+    ``{"ts": <unix>, "pid": <int>}``. A job is stale when:
+
+      * the file is missing, or
+      * the file is unreadable / malformed, or
+      * ``now - ts`` exceeds ``stale_threshold_sec`` (default 90 s = 3
+        missed beats, tolerating one GC pause / slow disk).
+
+    Used by ``tools/research_job_tool._action_status`` to mark dead
+    detached jobs and by the parent in job_runner to decide when to kill
+    a stuck child.
     """
-    return False
+    hb = Path(checkpoint_dir) / "heartbeat.json"
+    if not hb.exists():
+        return True
+    try:
+        data = json.loads(hb.read_text(encoding="utf-8"))
+        ts = float(data.get("ts", 0))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return True
+    return (time.time() - ts) > stale_threshold_sec
 
 
 # ---------------------------------------------------------------------------

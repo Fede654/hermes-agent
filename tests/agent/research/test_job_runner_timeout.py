@@ -1,19 +1,48 @@
-"""Stub tests for HRM-94 — real timeout with SIGTERM/SIGKILL.
+"""HRM-94 — parent-side timeout enforcement.
 
-These tests are intentionally RED (failing) until the timeout logic is
-implemented in agent/research/job_runner.py.
+The job_runner now spawns a fresh Python subprocess for the actual
+research loop. The parent watches wall-clock time and signals the child
+on expiry: SIGTERM, then SIGKILL after a 5 s grace. On timeout it
+overwrites ``state.json`` with ``status="timeout"``.
+
+Tests use the ``_test_mode`` hook in the spec so we don't need to mock
+``run_research`` across a process boundary — the child interprets the
+hook and just sleeps. Tunables (poll interval, SIGTERM grace) are
+shrunk via env vars to keep the suite fast.
 """
+
+from __future__ import annotations
 
 import json
 import os
-import signal
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
 from agent.research.job_runner import main as job_runner_main
+
+
+@pytest.fixture
+def fast_runner_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shrink job_runner timeouts so the suite finishes in seconds.
+
+    These env vars are read at import time by job_runner — the child
+    subprocess is a fresh interpreter that will read them from os.environ
+    we propagate via subprocess.Popen's default env inheritance.
+    """
+    monkeypatch.setenv("HERMES_JOB_HEARTBEAT_INTERVAL", "0.3")
+    monkeypatch.setenv("HERMES_JOB_STALE_THRESHOLD", "60")  # large — we want timeout, not stale
+    monkeypatch.setenv("HERMES_JOB_POLL_INTERVAL", "0.1")
+    monkeypatch.setenv("HERMES_JOB_SIGTERM_GRACE", "1")
+    # Module-level constants in the parent process were captured at
+    # import time. Rebind them so the running parent uses the test
+    # values too.
+    import agent.research.job_runner as jr
+    jr._HEARTBEAT_INTERVAL = 0.3
+    jr._STALE_THRESHOLD = 60
+    jr._POLL_INTERVAL = 0.1
+    jr._SIGTERM_GRACE = 1
 
 
 @pytest.fixture
@@ -34,57 +63,56 @@ def fake_spec(tmp_path: Path):
     return _make
 
 
-class TestJobRunnerTimeoutSpec:
-    def test_timeout_sec_forwarded_to_run_research(self, tmp_path: Path, fake_spec):
-        """HRM-94: timeout_sec from spec must be forwarded to run_research."""
-        spec_path = fake_spec(timeout_sec=120)
-        with patch("agent.research.job_runner._build_agent") as mock_build, \
-             patch("tools.research_tool.run_research") as mock_run:
-            mock_build.return_value = MagicMock()
-            mock_run.return_value = json.dumps({"result": "ok"})
-            rc = job_runner_main(str(spec_path))
-            assert rc == 0
-            _, kwargs = mock_run.call_args
-            assert kwargs.get("timeout_sec") == 120, (
-                "timeout_sec must be passed to run_research"
-            )
+class TestJobRunnerTimeout:
+    def test_completes_within_timeout(self, tmp_path: Path, fake_spec, fast_runner_env):
+        """Child finishes before timeout → parent returns 0, status=completed."""
+        spec_path = fake_spec(
+            timeout_sec=10,
+            _test_mode="sleep",
+            _test_sleep_sec=0.5,
+        )
+        rc = job_runner_main(str(spec_path))
+        assert rc == 0
+        state = json.loads((tmp_path / "state.json").read_text())
+        assert state["status"] == "completed"
 
-    def test_timeout_writes_state_timeout_on_expiry(self, tmp_path: Path, fake_spec):
-        """HRM-94: if the research loop exceeds timeout_sec, state.json must say 'timeout'."""
-        spec_path = fake_spec(timeout_sec=1)
-        with patch("agent.research.job_runner._build_agent") as mock_build, \
-             patch("tools.research_tool.run_research") as mock_run:
-            mock_build.return_value = MagicMock()
+    def test_timeout_writes_state_timeout(self, tmp_path: Path, fake_spec, fast_runner_env):
+        """Child runs longer than timeout → parent kills it, status=timeout."""
+        spec_path = fake_spec(
+            timeout_sec=2,
+            _test_mode="sleep",
+            _test_sleep_sec=30,
+        )
+        t0 = time.monotonic()
+        rc = job_runner_main(str(spec_path))
+        elapsed = time.monotonic() - t0
 
-            def _hang(*args, **kwargs):
-                time.sleep(10)
-                return json.dumps({"result": "ok"})
-
-            mock_run.side_effect = _hang
-            rc = job_runner_main(str(spec_path))
-
-        # RED — currently job_runner does not enforce timeout
         assert rc != 0
         state = json.loads((tmp_path / "state.json").read_text())
-        assert state.get("status") == "timeout", (
-            f"Expected status='timeout', got {state.get('status')}"
+        assert state.get("status") == "timeout", f"got status={state.get('status')!r}"
+        assert "Timed out" in state.get("error", "")
+        # Should kill within ~timeout + grace, not run the full 30 s sleep.
+        assert elapsed < 10, f"timeout took {elapsed:.1f}s — kill escalation broken?"
+
+    def test_child_pid_recorded_in_state(self, tmp_path: Path, fake_spec, fast_runner_env):
+        spec_path = fake_spec(
+            timeout_sec=10,
+            _test_mode="sleep",
+            _test_sleep_sec=0.5,
         )
+        job_runner_main(str(spec_path))
+        state = json.loads((tmp_path / "state.json").read_text())
+        assert isinstance(state.get("child_pid"), int)
+        assert state["child_pid"] != os.getpid()
 
-    def test_timeout_sends_sigterm_then_sigkill(self, tmp_path: Path, fake_spec):
-        """HRM-94: on timeout, job_runner must SIGTERM then SIGKILL the child process."""
-        spec_path = fake_spec(timeout_sec=1)
-        with patch("agent.research.job_runner._build_agent") as mock_build, \
-             patch("agent.research.job_runner.os.kill") as mock_kill, \
-             patch("multiprocessing.Process") as MockProcess, \
-             patch("tools.research_tool.run_research"):
-            mock_build.return_value = MagicMock()
-            proc = MagicMock()
-            proc.pid = 9999
-            proc.is_alive.return_value = True
-            MockProcess.return_value = proc
-
-            job_runner_main(str(spec_path))
-
-        # RED — currently no multiprocessing / kill logic exists
-        mock_kill.assert_any_call(9999, signal.SIGTERM)
-        mock_kill.assert_any_call(9999, signal.SIGKILL)
+    def test_no_timeout_when_zero(self, tmp_path: Path, fake_spec, fast_runner_env):
+        """timeout_sec=0 disables the wall-clock guard."""
+        spec_path = fake_spec(
+            timeout_sec=0,
+            _test_mode="sleep",
+            _test_sleep_sec=0.3,
+        )
+        rc = job_runner_main(str(spec_path))
+        assert rc == 0
+        state = json.loads((tmp_path / "state.json").read_text())
+        assert state["status"] == "completed"

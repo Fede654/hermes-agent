@@ -239,6 +239,20 @@ def _action_status(args: dict[str, Any]) -> str:
             except Exception:
                 state["process_alive"] = False
 
+        # HRM-95: heartbeat-based liveness. If the parent job_runner died
+        # without writing a terminal status (OOM, kill -9, host reboot),
+        # the heartbeat file goes cold within 90 s. Surface that as
+        # status="stale" so callers stop waiting for a job that won't
+        # progress. We only mark — we don't rewrite state.json from here
+        # because _action_status is read-only by contract.
+        try:
+            from tools.research_tool import check_research_stale
+            if check_research_stale(str(job_dir)):
+                state["status"] = "stale"
+                state["stale_reason"] = "no heartbeat for >90s"
+        except Exception:
+            pass
+
     # Include latest metric if available
     history_path = job_dir / "history.json"
     if history_path.exists():
