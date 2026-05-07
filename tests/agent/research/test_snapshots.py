@@ -241,3 +241,78 @@ class TestRestoreSnapshot:
 
         with pytest.raises(ValueError):
             restore_snapshot(snap_path, target)
+
+    def test_restore_rejects_single_dotdot(self, tmp_path: Path):
+        snap_path = tmp_path / "iter-0.json"
+        snap_path.write_text(json.dumps({
+            "iteration": 0,
+            "messages": [],
+            "metrics": {},
+            "files": [{"path": "../escape.txt", "content": "X"}],
+        }))
+        target = tmp_path / "out"
+
+        with pytest.raises(ValueError):
+            restore_snapshot(snap_path, target)
+
+    def test_restore_rejects_symlink_in_parent_path(self, tmp_path: Path):
+        target = tmp_path / "out"
+        target.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        # A subdirectory of target is replaced with a symlink to outside.
+        # Even though the resolved path of "round-x/payload" lands inside
+        # /tmp/.../outside (escaping target's tree on resolution), and is
+        # therefore caught by layer 1, the symlink check must reject it
+        # explicitly with a "traverses a symlink" message — defense in
+        # depth in case the symlink target is itself inside target_dir.
+        symlinked = target / "round-x"
+        symlinked.symlink_to(outside, target_is_directory=True)
+
+        snap_path = tmp_path / "iter-0.json"
+        snap_path.write_text(json.dumps({
+            "iteration": 0,
+            "messages": [],
+            "metrics": {},
+            "files": [{"path": "round-x/payload.txt", "content": "X"}],
+        }))
+
+        with pytest.raises(ValueError):
+            restore_snapshot(snap_path, target)
+
+    def test_restore_rejects_symlink_target_inside(self, tmp_path: Path):
+        """Symlink that points back inside target_dir is still refused —
+        we don't traverse symlinks at all."""
+        target = tmp_path / "out"
+        target.mkdir()
+        real_sub = target / "real"
+        real_sub.mkdir()
+        symlinked = target / "via-link"
+        symlinked.symlink_to(real_sub, target_is_directory=True)
+
+        snap_path = tmp_path / "iter-0.json"
+        snap_path.write_text(json.dumps({
+            "iteration": 0,
+            "messages": [],
+            "metrics": {},
+            "files": [{"path": "via-link/file.txt", "content": "X"}],
+        }))
+
+        with pytest.raises(ValueError):
+            restore_snapshot(snap_path, target)
+
+    def test_restore_normal_relative_path_succeeds(self, tmp_path: Path):
+        snap_path = tmp_path / "iter-0.json"
+        snap_path.write_text(json.dumps({
+            "iteration": 0,
+            "messages": [],
+            "metrics": {},
+            "files": [
+                {"path": "round-1/sub/dir/attempt.py", "content": "ok\n"},
+            ],
+        }))
+        target = tmp_path / "out"
+
+        restore_snapshot(snap_path, target)
+
+        assert (target / "round-1/sub/dir/attempt.py").read_text() == "ok\n"

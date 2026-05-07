@@ -438,18 +438,39 @@ def restore_snapshot(snapshot_path: Path, target_dir: Path) -> None:
         {"iteration": int, "messages": [...], "metrics": {...},
          "files": [{"path": "<relpath>", "content": "<text>"}, ...]}
 
-    Raises ValueError if any captured path would escape target_dir.
+    Raises ValueError if any captured path would escape target_dir, either
+    via ``..`` components or via symlinks anywhere in the parent chain.
+    Path validation happens in two layers:
+
+      1. Canonical-path containment: the resolved destination must be a
+         descendant of the resolved target_dir. This catches ``..`` and
+         absolute-path entries.
+      2. No symlink in the parent chain: every existing path component
+         from target_dir up to (but not including) the destination is
+         checked with ``os.path.islink``. If anything in the chain is a
+         symlink we refuse to write through it, even if it currently
+         resolves inside target_dir — symlinks are an attacker-controlled
+         redirection point.
     """
     data = json.loads(Path(snapshot_path).read_text(encoding="utf-8"))
     target_dir = Path(target_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
     target_resolved = target_dir.resolve()
 
+    # Reject if target_dir itself is a symlink — we'd be writing outside
+    # the directory the caller named.
+    if os.path.islink(target_dir):
+        raise ValueError(
+            f"target_dir is a symlink, refusing to restore: {target_dir!r}"
+        )
+
     for entry in data.get("files", []):
         rel = entry.get("path")
         content = entry.get("content", "")
         if not isinstance(rel, str) or not isinstance(content, str):
             continue
+
+        # Layer 1: canonical containment.
         dest = (target_dir / rel).resolve()
         try:
             dest.relative_to(target_resolved)
@@ -457,6 +478,21 @@ def restore_snapshot(snapshot_path: Path, target_dir: Path) -> None:
             raise ValueError(
                 f"snapshot path escapes target_dir: {rel!r}"
             ) from None
+
+        # Layer 2: symlinks in the parent chain. Walk every component of
+        # the *unresolved* destination from target_dir down to dest's
+        # parent, rejecting any existing symlink. We use the unresolved
+        # form because resolve() already followed symlinks; we want to
+        # detect them, not silently traverse.
+        unresolved = target_dir / rel
+        check = target_dir
+        for part in unresolved.relative_to(target_dir).parts[:-1]:
+            check = check / part
+            if check.exists() and os.path.islink(check):
+                raise ValueError(
+                    f"snapshot path traverses a symlink: {rel!r} (at {check})"
+                )
+
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(content, encoding="utf-8")
 
