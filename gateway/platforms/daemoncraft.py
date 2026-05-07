@@ -2,10 +2,13 @@
 DaemonCraft platform adapter for Hermes Gateway.
 
 Routes Minecraft chat (player whispers + world broadcasts) through the
-Hermes AIAgent, while the agent_loop.py handles embodiment (movement,
+Hermes AIAgent, while the body adapter handles embodiment (movement,
 quest engine, sensors).
 
-The adapter consumes the Bot API WebSocket and HTTP endpoints:
+The adapter consumes the Bot API WebSocket and HTTP endpoints via the
+Body Protocol abstraction (daemoncraft_body.py), supporting both
+Hermescraft (Mineflayer) and Mindcraft sidecar bodies.
+
   - WS /ws       : inbound chat events (array snapshot)
   - POST /chat/send   : outbound text
   - POST /tts/play    : outbound TTS relay to dashboards
@@ -13,19 +16,23 @@ The adapter consumes the Bot API WebSocket and HTTP endpoints:
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import random
 import time
 import uuid
-from typing import Any, Dict, Optional, Set
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Any, Deque, Dict, Optional, Set
 
 import aiohttp
 from aiohttp import WSMsgType
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
+from gateway.platforms.daemoncraft_body import make_body, Body
 from gateway.session import SessionSource, build_session_key
 
 logger = logging.getLogger(__name__)
@@ -36,6 +43,7 @@ META_NO_CLAMP = "_no_clamp"  # Set in metadata to bypass gateway-side char clamp
 GATEWAY_HANDLES_QUEST_EVENTS = os.getenv("GATEWAY_HANDLES_QUEST_EVENTS", "0") == "1"
 GATEWAY_HANDLES_CHAT = os.getenv("GATEWAY_HANDLES_CHAT", "0") == "1"
 
+
 class DaemonCraftAdapter(BasePlatformAdapter):
     """Gateway adapter for DaemonCraft (Minecraft bot API)."""
 
@@ -44,6 +52,7 @@ class DaemonCraftAdapter(BasePlatformAdapter):
         self._bot_api_url: str = (config.extra or {}).get("bot_api_url", "")
         self._bot_username: str = (config.extra or {}).get("bot_username", "")
         self._profile: str = (config.extra or {}).get("profile", "")
+        self._body_kind: str = (config.extra or {}).get("body_kind", "hermescraft")
         self._allowed_users: Set[str] = set()
         self._session: Optional[aiohttp.ClientSession] = None
         self._ws_task: Optional[asyncio.Task] = None
@@ -55,6 +64,21 @@ class DaemonCraftAdapter(BasePlatformAdapter):
         self._last_tts_time: float = 0.0
         self._tts_queue: list[dict] = []  # Dedup buffer for rapid-fire messages
 
+        # Body abstraction (replaces hard-coded aiohttp calls)
+        self._body: Optional[Body] = None
+        if self._bot_api_url and self._bot_username:
+            self._body = make_body(self._body_kind, self._bot_api_url, self._bot_username)
+            logger.info(
+                "[DaemonCraft] Body: %s @ %s as %s (screenshot=%s impersonation=%s set_goal=%s act=%s)",
+                self._body.kind,
+                self._body.api_url,
+                self._body.username,
+                self._body.supports_screenshot,
+                self._body.supports_impersonation,
+                self._body.supports_set_goal,
+                self._body.supports_act,
+            )
+
         # Plan tracking for heartbeat-driven progress evaluation and GC
         self._plan_goal: Optional[str] = None
         self._plan_tasks_snapshot: list = []
@@ -62,6 +86,18 @@ class DaemonCraftAdapter(BasePlatformAdapter):
         self._plan_last_progress_at: float = 0.0
         self._plan_gc_timeout: int = (config.extra or {}).get("plan_gc_timeout_seconds", 300)
         self._turn_counter: int = 0  # Sequential turn counter for agent logs
+
+        # Phase-8 cycle detector. Disabled by default (n=0). Configurable via:
+        #   MC_CYCLE_N      — minimum identical sigs in window to trigger
+        #   MC_CYCLE_WINDOW — window size
+        #   MC_CYCLE_ACTION — 'warn' | 'interrupt'
+        cycle_n = int(os.getenv("MC_CYCLE_N", "0") or 0)
+        cycle_window = int(os.getenv("MC_CYCLE_WINDOW", "6") or 6)
+        cycle_action = (os.getenv("MC_CYCLE_ACTION") or "warn").lower()
+        self._cycle_detector: Optional[CycleDetector] = None
+        if cycle_n > 0:
+            self._cycle_detector = CycleDetector(n=cycle_n, window=cycle_window, action=cycle_action)
+            logger.info("[DaemonCraft] Cycle detector: n=%d window=%d action=%s", cycle_n, cycle_window, cycle_action)
 
         # Load allowlist by UUID (preferred) or username fallback.
         raw_allow = os.getenv("DAEMONCRAFT_ALLOWED_USERS", "").strip()
@@ -93,6 +129,9 @@ class DaemonCraftAdapter(BasePlatformAdapter):
             return False
         if not self._bot_username:
             logger.error("[DaemonCraft] bot_username missing in platform config extra")
+            return False
+        if self._body is None:
+            logger.error("[DaemonCraft] body adapter failed to initialise")
             return False
 
         self._last_seen_timestamp = int(time.time() * 1000)
@@ -136,6 +175,10 @@ class DaemonCraftAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
 
     async def _ws_loop(self) -> None:
+        if self._body is None or self._session is None:
+            logger.error("[DaemonCraft] Cannot start WS loop: body or session missing")
+            return
+
         ws_url = self._bot_api_url.replace("http://", "ws://").replace("https://", "wss://") + "/ws"
         while not self._shutdown_event.is_set():
             try:
@@ -255,16 +298,14 @@ class DaemonCraftAdapter(BasePlatformAdapter):
 
     async def _interrupt_agent(self, reason: str) -> None:
         """POST /agent/interrupt to abort the loop's in-progress LLM turn."""
+        if self._body is None or self._session is None:
+            return
         try:
-            async with self._session.post(
-                f"{self._bot_api_url}/agent/interrupt",
-                json={"reason": reason},
-            ) as resp:
-                if resp.status >= 400:
-                    body = await resp.text()
-                    logger.warning("[DaemonCraft] /agent/interrupt failed: %s %s", resp.status, body)
-                else:
-                    logger.debug("[DaemonCraft] /agent/interrupt sent (%s)", reason)
+            result = await self._body.interrupt(self._session, reason)
+            if not result.get("ok"):
+                logger.warning("[DaemonCraft] /agent/interrupt failed: %s", result.get("error"))
+            else:
+                logger.debug("[DaemonCraft] /agent/interrupt sent (%s)", reason)
         except Exception as e:
             logger.warning("[DaemonCraft] /agent/interrupt exception: %s", e)
 
@@ -481,16 +522,15 @@ class DaemonCraftAdapter(BasePlatformAdapter):
                 f"Plan '{self._plan_goal}' cancelled after {int(age)}s "
                 f"with no progress for {int(since_progress)}s"
             )
-            # Clear plan on bot server
-            try:
-                async with self._session.post(
-                    f"{self._bot_api_url}/plan/update",
-                    json={"action": "clear_goal"},
-                ) as resp:
-                    if resp.status < 400:
-                        logger.info("[DaemonCraft] Plan cleared on bot server")
-            except Exception as e:
-                logger.warning("[DaemonCraft] Failed to clear plan on bot server: %s", e)
+            # Clear plan on bot server via body adapter
+            if self._body and self._session:
+                try:
+                    await self._body._post(
+                        self._session, "/plan/update", {"action": "clear_goal"}
+                    )
+                    logger.info("[DaemonCraft] Plan cleared on bot server")
+                except Exception as e:
+                    logger.warning("[DaemonCraft] Failed to clear plan on bot server: %s", e)
 
             # Reset local tracking
             self._plan_goal = None
@@ -558,13 +598,13 @@ class DaemonCraftAdapter(BasePlatformAdapter):
         keywords, create a plan goal directly via the bot server so the loop
         can execute it on the next heartbeat.
         """
+        if self._body is None or self._session is None:
+            return
         try:
             # Fetch current plan
-            async with self._session.post(
-                f"{self._bot_api_url}/action/plan",
-                json={"action": "get_plan"},
-            ) as resp:
-                plan = await resp.json() if resp.status < 400 else {}
+            plan = await self._body.get_plan(self._session)
+            if not isinstance(plan, dict):
+                plan = {}
 
             # If plan already has a goal, don't overwrite
             if plan.get("goal"):
@@ -589,20 +629,20 @@ class DaemonCraftAdapter(BasePlatformAdapter):
                 goal = goal[:200] + "..."
 
             epoch = plan.get("epoch", 0)
-            async with self._session.post(
-                f"{self._bot_api_url}/action/plan",
-                json={
+            result = await self._body._post(
+                self._session,
+                "/action/plan",
+                {
                     "action": "set_goal",
                     "goal": goal,
                     "tasks": [],
                     "expected_epoch": epoch,
                 },
-            ) as resp:
-                if resp.status < 400:
-                    logger.info("[DaemonCraft] Auto-created plan from chat: %s", goal)
-                else:
-                    body = await resp.text()
-                    logger.warning("[DaemonCraft] Plan mutation failed: %s", body)
+            )
+            if result and result.get("ok"):
+                logger.info("[DaemonCraft] Auto-created plan from chat: %s", goal)
+            else:
+                logger.warning("[DaemonCraft] Plan mutation failed: %s", result.get("error") if result else "no response")
         except Exception as e:
             logger.warning("[DaemonCraft] Plan mutation check failed: %s", e)
 
@@ -742,6 +782,10 @@ class DaemonCraftAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
+        if self._body is None or self._session is None:
+            logger.warning("[DaemonCraft] Cannot send: body or session missing")
+            return SendResult(success=False, error="body not initialised")
+
         # Log agent turn to bot server for dashboard display
         await self._post_agent_log(content, metadata)
 
@@ -749,29 +793,17 @@ class DaemonCraftAdapter(BasePlatformAdapter):
         # initiates an outbound broadcast before any inbound from that world, this
         # will default to DM (whisper). For now the agent only replies to inbound.
         is_group = self._is_group_chat_id(chat_id)
-        payload: dict[str, Any] = {"message": content}
+        target = "broadcast" if is_group else chat_id
 
-        if is_group:
-            payload["target"] = "broadcast"
-        else:
-            payload["target"] = chat_id
-
-        try:
-            async with self._session.post(
-                f"{self._bot_api_url}/chat/send",
-                json=payload,
-            ) as resp:
-                if resp.status >= 400:
-                    body = await resp.text()
-                    logger.warning("[DaemonCraft] /chat/send failed: %s %s", resp.status, body)
-                    return SendResult(success=False, error=f"HTTP {resp.status}: {body}")
-                return SendResult(success=True)
-        except Exception as e:
-            logger.warning("[DaemonCraft] /chat/send exception: %s", e)
-            return SendResult(success=False, error=str(e), retryable=True)
+        result = await self._body.chat(self._session, content)
+        if result.get("ok"):
+            return SendResult(success=True)
+        return SendResult(success=False, error=result.get("error", "unknown"), retryable=True)
 
     async def _post_agent_log(self, content: str, metadata: Optional[Dict[str, Any]] = None) -> None:
         """Post agent turn to bot server /agent/log for dashboard display."""
+        if self._body is None or self._session is None:
+            return
         try:
             self._turn_counter += 1
             tool_calls = []
@@ -785,18 +817,14 @@ class DaemonCraftAdapter(BasePlatformAdapter):
                 "tool_calls": tool_calls,
                 "error": None,
             }
-            async with self._session.post(
-                f"{self._bot_api_url}/agent/log",
-                json=payload,
-            ) as resp:
-                if resp.status >= 400:
-                    body = await resp.text()
-                    logger.debug("[DaemonCraft] /agent/log failed: %s %s", resp.status, body)
+            await self._body.log_turn(self._session, payload)
         except Exception as e:
             logger.debug("[DaemonCraft] /agent/log exception: %s", e)
 
     async def _copy_and_relay_tts(self, audio_path: str, chat_id: str) -> SendResult:
         """Copy audio to shared TTS cache and POST /tts/play to dashboards."""
+        if self._body is None or self._session is None:
+            return SendResult(success=False, error="body not initialised")
         try:
             import shutil
 
@@ -809,15 +837,15 @@ class DaemonCraftAdapter(BasePlatformAdapter):
             # Build public URL — bot API serves /tts/audio/:filename
             audio_url = f"{self._bot_api_url}/tts/audio/{filename}"
 
-            async with self._session.post(
-                f"{self._bot_api_url}/tts/play",
-                json={"audio_url": audio_url, "chat_id": chat_id},
-            ) as resp:
-                if resp.status >= 400:
-                    body = await resp.text()
-                    logger.warning("[DaemonCraft] /tts/play failed: %s %s", resp.status, body)
-                    return SendResult(success=False, error=f"HTTP {resp.status}: {body}")
-            return SendResult(success=True)
+            result = await self._body._post(
+                self._session, "/tts/play", {"audio_url": audio_url, "chat_id": chat_id}
+            )
+            if result and result.get("ok"):
+                return SendResult(success=True)
+            return SendResult(
+                success=False,
+                error=result.get("error", "HTTP error") if result else "no response",
+            )
         except Exception as e:
             logger.warning("[DaemonCraft] /tts/play exception: %s", e)
             return SendResult(success=False, error=str(e), retryable=True)
@@ -850,6 +878,91 @@ class DaemonCraftAdapter(BasePlatformAdapter):
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         chat_type = "group" if self._is_group_chat_id(chat_id) else "dm"
         return {"name": chat_id, "type": chat_type, "chat_id": chat_id}
+
+    async def _check_cycle(self, name: str, args: Any) -> bool:
+        """Feed a tool call to the cycle detector. Returns True if an interrupt is warranted."""
+        if self._cycle_detector is None:
+            return False
+        result = self._cycle_detector.record(name, args)
+        if result.triggered:
+            logger.warning(
+                "[DaemonCraft] CYCLE DETECTED: tool=%s sig=%s count=%d/%d action=%s",
+                name, result.sig, result.count, result.window, result.action,
+            )
+            if result.action == "interrupt":
+                await self._interrupt_agent("cycle_detected")
+                return True
+            # warn / log / chat actions are advisory — log only
+        return False
+
+
+# ------------------------------------------------------------------
+# CycleDetector (ported from DaemonCraft agents/safety.py)
+# ------------------------------------------------------------------
+
+def _canonicalize(args: Any) -> str:
+    """Stable JSON for any args structure."""
+    try:
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except Exception:
+                return args
+        return json.dumps(args, sort_keys=True, default=str)
+    except Exception:
+        return repr(args)
+
+
+def _signature(name: str, args: Any) -> str:
+    payload = f"{name}|{_canonicalize(args)}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
+@dataclass
+class CycleResult:
+    triggered: bool
+    sig: Optional[str]
+    count: int
+    window: int
+    action: str
+
+
+@dataclass
+class CycleDetector:
+    """Ring-buffer cycle detector."""
+    n: int = 4
+    window: int = 6
+    action: str = "log"
+    _buf: Deque[str] = field(default_factory=deque)
+    _last_triggered_sig: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        self._buf = deque(maxlen=max(self.window, self.n))
+
+    def record(self, name: str, args: Any) -> CycleResult:
+        sig = _signature(name, args)
+        self._buf.append(sig)
+        return self.evaluate()
+
+    def evaluate(self) -> CycleResult:
+        if len(self._buf) < self.n:
+            return CycleResult(False, None, 0, len(self._buf), self.action)
+        counts: Dict[str, int] = {}
+        for s in self._buf:
+            counts[s] = counts.get(s, 0) + 1
+        top_sig, top_count = max(counts.items(), key=lambda kv: kv[1])
+        if top_count >= self.n:
+            if top_sig == self._last_triggered_sig:
+                return CycleResult(False, top_sig, top_count, len(self._buf), self.action)
+            self._last_triggered_sig = top_sig
+            return CycleResult(True, top_sig, top_count, len(self._buf), self.action)
+        if self._last_triggered_sig and self._last_triggered_sig != top_sig:
+            self._last_triggered_sig = None
+        return CycleResult(False, top_sig, top_count, len(self._buf), self.action)
+
+    def reset(self) -> None:
+        self._buf.clear()
+        self._last_triggered_sig = None
 
 
 # ------------------------------------------------------------------
