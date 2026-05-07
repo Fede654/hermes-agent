@@ -548,11 +548,11 @@ class DaemonCraftAdapter(BasePlatformAdapter):
         - Bot is stuck on a movement task (task_stuck in status)
         - Active plan exists (agent must evaluate progress every heartbeat)
         - Health decreased from previous known value
-        - Nearby hostile entities (zombie, skeleton, creeper, spider)
+        - Hostile entities in visible_entities (PerceptionSnapshot)
+        - Hazards listed in the snapshot hazards array
         - Explicit damage events in events list
         """
         status = data.get("status") or {}
-        nearby = data.get("nearby") or {}
         events = data.get("events") or []
         plan = data.get("plan") or {}
 
@@ -582,11 +582,17 @@ class DaemonCraftAdapter(BasePlatformAdapter):
             if any(k in ev_str for k in ("damage", "hurt", "attack", "hit", "died", "killed")):
                 return "wake_up"
 
-        # Nearby hostile mobs
+        # Hostile mobs in pre-filtered visible_entities (PerceptionSnapshot)
         hostile = {"zombie", "skeleton", "creeper", "spider", "enderman", "witch", "husk", "drowned", "phantom"}
-        for ent in nearby.get("entities", [])[:12]:
-            name = str(ent.get("name", ent) if isinstance(ent, dict) else ent).lower()
+        for ent in (data.get("visible_entities") or [])[:12]:
+            name = str(ent.get("type", ent) if isinstance(ent, dict) else ent).lower()
             if any(h in name for h in hostile):
+                return "wake_up"
+
+        # Hazards in the snapshot (e.g. lava, fire)
+        for haz in (data.get("hazards") or [])[:5]:
+            haz_str = str(haz).lower()
+            if any(k in haz_str for k in ("lava", "fire", "cactus", "sweet_berry_bush", "magma")):
                 return "wake_up"
 
         return "context"
