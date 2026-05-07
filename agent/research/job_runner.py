@@ -45,6 +45,7 @@ from typing import Any
 # logic lives in supervisor._detect_resume — see the docstring there for
 # the consistency-vs-probe distinction.
 from agent.research.supervisor import _detect_resume  # noqa: F401
+from agent.research.events import ResearchEvent, emit_event
 
 logger = logging.getLogger(__name__)
 
@@ -297,6 +298,7 @@ def main(spec_path: str) -> int:
     try:
         _setup_logging(job_dir)
         logger.info("Job %s starting (parent pid=%d)", spec["job_id"], os.getpid())
+        emit_event(job_dir, ResearchEvent.JOB_STARTED, {"job_id": spec["job_id"], "parent_pid": os.getpid()})
 
         timeout_sec = int(spec.get("timeout_sec", 0) or 0)
 
@@ -345,6 +347,7 @@ def main(spec_path: str) -> int:
                     "Timeout: child %s exceeded %ds, killing", proc.pid, timeout_sec
                 )
                 _kill_with_escalation(proc)
+                emit_event(job_dir, ResearchEvent.TIMEOUT_DETECTED, {"timeout_sec": timeout_sec})
                 _write_state(
                     job_dir,
                     status="timeout",
@@ -373,6 +376,7 @@ def main(spec_path: str) -> int:
                     proc.pid, startup_grace,
                 )
                 _kill_with_escalation(proc)
+                emit_event(job_dir, ResearchEvent.STALE_DETECTED, {"reason": "no_initial_heartbeat"})
                 _write_state(
                     job_dir,
                     status="stale",

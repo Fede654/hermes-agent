@@ -41,6 +41,7 @@ from agent.research.runner import (
     HermesExperimentConfig,
 )
 from agent.research.metrics import UniversalMetricParser
+from agent.research.events import ResearchEvent, emit_event
 
 logger = logging.getLogger(__name__)
 
@@ -709,6 +710,10 @@ class ResearchSupervisor:
             self._observe(baseline, spec, run_dir)
             self._checkpoint(runner.history, checkpoint_dir, round=0)
             self._snapshot(runner.history, checkpoint_dir, run_dir, iteration=0, result=baseline)
+            if checkpoint_dir:
+                emit_event(checkpoint_dir, ResearchEvent.CHECKPOINT_SAVED, {"round": 0})
+                emit_event(checkpoint_dir, ResearchEvent.SNAPSHOT_CREATED, {"iteration": 0})
+                emit_event(checkpoint_dir, ResearchEvent.BASELINE_COMPLETED, {"metric": getattr(baseline, "primary_metric", None)})
 
         if llm is None:
             lattice_comment_fn(f"Baseline only. best={runner.history.baseline_metric}")
