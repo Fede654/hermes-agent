@@ -626,6 +626,7 @@ class ResearchSupervisor:
         worker_toolsets: list[str] | None = None,
         checkpoint_dir: Path | None = None,
         fan_out: int = 1,
+        use_moa: bool = True,
     ) -> ExperimentHistory:
         """Run the Karpathy loop for any TaskSpec.
 
@@ -641,8 +642,8 @@ class ResearchSupervisor:
             worker_toolsets: Override default toolsets for workers.
             fan_out: Number of parallel hypothesis branches per iteration.
                 1 = sequential (default). >1 = parallel fan-out.
-
-        Returns:
+            use_moa: When fan_out > 1, synthesize all branches into a super-attempt
+                (MOA aggregation). Set to False to use only the best branch.
             ExperimentHistory with all round results and the best result.
         """
         config = HermesExperimentConfig(
@@ -801,17 +802,24 @@ class ResearchSupervisor:
                     continue
 
                 result = best_result
-                # MOA-style aggregation (HRM-109): synthesize all branches into
-                # a super-attempt that combines the best ideas from each branch.
-                # The aggregated attempt becomes the seed for the next iteration,
-                # while the best branch's metric determines if this round improved.
-                lattice_comment_fn(
-                    f"MOA aggregation: synthesizing {len(results)} branches"
-                )
-                aggregated_attempt = self._aggregate_attempts(
-                    llm, spec, results, best_artifact_holder[0]
-                )
-                actual_artifact = aggregated_attempt
+                if use_moa:
+                    # MOA-style aggregation (HRM-109): synthesize all branches into
+                    # a super-attempt that combines the best ideas from each branch.
+                    # The aggregated attempt becomes the seed for the next iteration,
+                    # while the best branch's metric determines if this round improved.
+                    lattice_comment_fn(
+                        f"MOA aggregation: synthesizing {len(results)} branches"
+                    )
+                    aggregated_attempt = self._aggregate_attempts(
+                        llm, spec, results, best_artifact_holder[0]
+                    )
+                    actual_artifact = aggregated_attempt
+                else:
+                    # Fan-out without aggregation: use best branch directly
+                    lattice_comment_fn(
+                        f"Fan-out best branch: using branch 1/{len(results)} (no MOA)"
+                    )
+                    actual_artifact = self._read_artifact(spec, run_dir, best_result) or best_result.code or attempt_holder[0]
                 self._observe(best_result, spec, run_dir)
                 self._checkpoint(runner.history, checkpoint_dir, round=iteration)
                 self._snapshot(

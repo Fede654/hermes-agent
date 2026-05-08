@@ -18,6 +18,8 @@ from agent.research.runner import (
 from agent.research.metrics import UniversalMetricParser
 from agent.research.evolution import EvolutionStore, LessonEntry, LessonCategory
 
+from agent.research.ab_testing import ResearchABTester, StrategyConfig, StrategyRun, StrategySummary
+
 __all__ = [
     "ResearchSupervisor",
     "TaskSpec",
@@ -30,4 +32,8 @@ __all__ = [
     "EvolutionStore",
     "LessonEntry",
     "LessonCategory",
+    "ResearchABTester",
+    "StrategyConfig",
+    "StrategyRun",
+    "StrategySummary",
 ]
