@@ -9027,6 +9027,9 @@ def main():
         "reset", help="Clear exhaustion status for all credentials for a provider"
     )
     auth_reset.add_argument("provider", help="Provider id")
+    auth_kimi = auth_subparsers.add_parser(
+        "kimi", help="Show Kimi CLI OAuth diagnostics"
+    )
     auth_status = auth_subparsers.add_parser(
         "status", help="Show auth status for a provider"
     )
