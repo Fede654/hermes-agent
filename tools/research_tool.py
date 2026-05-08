@@ -117,6 +117,29 @@ RESEARCH_TOOL_SCHEMA = {
                 "type": "string",
                 "description": "Optional Lattice task ID to receive round-by-round progress comments.",
             },
+            "strategies": {
+                "type": "array",
+                "description": (
+                    "Optional A/B test strategies. If provided, runs each strategy "
+                    "and returns a comparison table instead of a single run. "
+                    "Each item is an object with: name, fan_out (int), use_moa (bool), max_iterations (int)."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "fan_out": {"type": "integer", "default": 1},
+                        "use_moa": {"type": "boolean", "default": True},
+                        "max_iterations": {"type": "integer", "default": 3},
+                    },
+                    "required": ["name"],
+                },
+            },
+            "repeats": {
+                "type": "integer",
+                "description": "Number of repeats per strategy when running A/B tests (default: 1).",
+                "default": 1,
+            },
         },
         "required": ["topic", "deliverable", "metric_key"],
     },
@@ -166,11 +189,15 @@ def run_research(
     time_budget_sec: int = 0,
     lattice_task_id: Optional[str] = None,
     parent_agent: Any = None,
+    checkpoint_dir: Optional[str] = None,
+    timeout_sec: int = 0,
+    strategies: Optional[list[dict[str, Any]]] = None,
+    repeats: int = 1,
 ) -> str:
     if parent_agent is None:
         return json.dumps({"error": "run_research requires a parent_agent context."})
 
-    from agent.research_supervisor import ResearchSupervisor, TaskSpec
+    from agent.research.supervisor import ResearchSupervisor, TaskSpec
     from hermes_constants import get_hermes_home
 
     spec = TaskSpec(
@@ -187,6 +214,47 @@ def run_research(
     run_id = hashlib.sha1(f"{topic}:{time.time()}".encode()).hexdigest()[:12]
     workspace = get_hermes_home() / "research-workspace"
 
+    # A/B testing path
+    if strategies:
+        from agent.research.ab_testing import ResearchABTester, StrategyConfig
+
+        strategy_configs = [
+            StrategyConfig(
+                name=s.get("name", f"strategy-{i}"),
+                fan_out=s.get("fan_out", 1),
+                use_moa=s.get("use_moa", True),
+                max_iterations=s.get("max_iterations", max_iterations),
+                time_budget_sec=time_budget_sec,
+            )
+            for i, s in enumerate(strategies)
+        ]
+
+        tester = ResearchABTester(
+            parent_agent=parent_agent,
+            workspace=workspace,
+            lattice_task_id=lattice_task_id,
+            llm=_LLMBridge(),
+        )
+        try:
+            summaries = tester.compare(
+                spec,
+                strategy_configs,
+                initial_attempt=initial_attempt,
+                repeats=repeats,
+                run_prefix=run_id,
+            )
+        except Exception as exc:
+            logger.exception("A/B test failed for run_id=%s: %s", run_id, exc)
+            return json.dumps({"error": str(exc), "run_id": run_id})
+
+        return json.dumps({
+            "run_id": run_id,
+            "ab_test": True,
+            "report": tester.format_report(summaries),
+            "json": json.loads(tester.to_json(summaries)),
+        }, indent=2)
+
+    # Single-run path
     supervisor = ResearchSupervisor(
         parent_agent=parent_agent,
         workspace=workspace,
@@ -201,6 +269,7 @@ def run_research(
             max_iterations=max_iterations,
             time_budget_sec=time_budget_sec,
             llm=_LLMBridge(),
+            checkpoint_dir=Path(checkpoint_dir) if checkpoint_dir else None,
         )
     except Exception as exc:
         logger.exception("run_research failed for run_id=%s: %s", run_id, exc)
@@ -213,6 +282,25 @@ def run_research(
         m = re.search(r"NOTES:\s*(.+)", best.stdout)
         best_notes = m.group(1).strip() if m else ""
 
+    # Aggregate cost accounting across iterations
+    iteration_costs = []
+    total_tokens_in = 0
+    total_tokens_out = 0
+    total_cost_usd = 0.0
+    for r in history.results:
+        iteration_costs.append({
+            "iteration": r.iteration,
+            "tokens_in": r.tokens_in,
+            "tokens_out": r.tokens_out,
+            "cost_usd": round(r.cost_usd, 6),
+            "primary_metric": r.primary_metric,
+            "improved": r.improved,
+            "kept": r.kept,
+        })
+        total_tokens_in += r.tokens_in
+        total_tokens_out += r.tokens_out
+        total_cost_usd += r.cost_usd
+
     return json.dumps({
         "run_id": run_id,
         "iterations": len(history.results),
@@ -222,7 +310,39 @@ def run_research(
         "best_notes": best_notes,
         "workspace": str(workspace / run_id),
         "learnings_file": str(workspace / run_id / "learnings.jsonl"),
+        "iteration_costs": iteration_costs,
+        "total_tokens_in": total_tokens_in,
+        "total_tokens_out": total_tokens_out,
+        "total_cost_usd": round(total_cost_usd, 6),
+        "total_iterations": len(history.results),
     }, indent=2)
+
+
+def check_research_stale(checkpoint_dir: str, stale_threshold_sec: float = 90.0) -> bool:
+    """Return True if the research job at checkpoint_dir has no recent heartbeat.
+
+    The heartbeat file is ``<checkpoint_dir>/heartbeat.json``, written by
+    ``agent.research.job_runner._child_main`` every 30 s with the schema
+    ``{"ts": <unix>, "pid": <int>}``. A job is stale when:
+
+      * the file is missing, or
+      * the file is unreadable / malformed, or
+      * ``now - ts`` exceeds ``stale_threshold_sec`` (default 90 s = 3
+        missed beats, tolerating one GC pause / slow disk).
+
+    Used by ``tools/research_job_tool._action_status`` to mark dead
+    detached jobs and by the parent in job_runner to decide when to kill
+    a stuck child.
+    """
+    hb = Path(checkpoint_dir) / "heartbeat.json"
+    if not hb.exists():
+        return True
+    try:
+        data = json.loads(hb.read_text(encoding="utf-8"))
+        ts = float(data.get("ts", 0))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return True
+    return (time.time() - ts) > stale_threshold_sec
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +354,7 @@ from tools.registry import registry, tool_error  # noqa: E402
 
 def _check_research_requirements() -> bool:
     try:
-        from agent.research_supervisor import ResearchSupervisor  # noqa: F401
+        from agent.research.supervisor import ResearchSupervisor  # noqa: F401
         return True
     except ImportError:
         return False
@@ -258,6 +378,9 @@ registry.register(
         time_budget_sec=args.get("time_budget_sec", 0),
         lattice_task_id=args.get("lattice_task_id"),
         parent_agent=kw.get("parent_agent"),
+        checkpoint_dir=args.get("checkpoint_dir"),
+        strategies=args.get("strategies"),
+        repeats=args.get("repeats", 1),
     ),
     check_fn=_check_research_requirements,
     emoji="🔬",
