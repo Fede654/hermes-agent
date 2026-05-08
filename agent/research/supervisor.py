@@ -366,6 +366,30 @@ def _call_delegate_task(
         return {"results": [{"status": "failed", "summary": raw or "", "error": "JSON parse failed"}]}
 
 
+def _call_delegate_task_batch(
+    tasks: list[dict[str, Any]],
+    *,
+    parent_agent: Any,
+    toolsets: list[str] | None = None,
+) -> dict[str, Any]:
+    """Batch variant of _call_delegate_task using delegate_task's tasks array.
+
+    Each task dict must contain at least 'goal' and 'context'. Returns the
+    parsed JSON result with a 'results' array, one entry per task.
+    """
+    from tools.delegate_tool import delegate_task
+    raw = delegate_task(
+        tasks=tasks,
+        toolsets=toolsets or ["terminal", "file"],
+        parent_agent=parent_agent,
+        inherit_profile=True,
+    )
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {"results": [{"status": "failed", "summary": raw or "", "error": "JSON parse failed"}]}
+
+
 # ---------------------------------------------------------------------------
 # Lattice comment bridge
 # ---------------------------------------------------------------------------
@@ -601,6 +625,7 @@ class ResearchSupervisor:
         llm: Any = None,
         worker_toolsets: list[str] | None = None,
         checkpoint_dir: Path | None = None,
+        fan_out: int = 1,
     ) -> ExperimentHistory:
         """Run the Karpathy loop for any TaskSpec.
 
@@ -614,6 +639,8 @@ class ResearchSupervisor:
             keep_threshold: Min absolute metric delta to count as kept.
             llm: LLM client for improvement proposals (None = baseline only).
             worker_toolsets: Override default toolsets for workers.
+            fan_out: Number of parallel hypothesis branches per iteration.
+                1 = sequential (default). >1 = parallel fan-out.
 
         Returns:
             ExperimentHistory with all round results and the best result.
@@ -746,21 +773,69 @@ class ResearchSupervisor:
         # Autogenesis AOOR improvement loop
         no_improvement = 0
         for iteration in range(start_iteration, max_iterations + 1):
-            # OPTIMIZE — propose revised attempt (SEPL: propose)
-            next_attempt = self._improve_attempt(llm, spec, attempt_holder[0], runner.history)
-            attempt_holder[0] = next_attempt
+            if fan_out > 1:
+                # HYPOTHESIS FAN-OUT (HRM-108): generate N variants and run in parallel
+                lattice_comment_fn(
+                    f"Fan-out iteration {iteration}: generating {fan_out} hypotheses"
+                )
+                attempts = self._fan_out_attempts(
+                    llm, spec, attempt_holder[0], runner.history, fan_out
+                )
+                results = self._run_fan_out_iteration(
+                    spec=spec,
+                    attempts=attempts,
+                    run_id=run_id,
+                    iteration=iteration,
+                    time_budget_sec=time_budget_sec,
+                    worker_toolsets=toolsets,
+                    llm=llm,
+                    history=runner.history,
+                    keep_threshold=keep_threshold,
+                )
+                # results sorted best-first; observe/checkpoint only the winner
+                best_result = results[0] if results else None
+                if best_result is None:
+                    logger.warning("Fan-out iteration %d produced no results", iteration)
+                    no_improvement += 1
+                    attempt_holder[0] = best_artifact_holder[0]
+                    continue
 
-            # ACT — worker executes the attempt
-            result = runner.run_experiment(next_attempt, run_id=run_id, iteration=iteration)
+                result = best_result
+                actual_artifact = (
+                    self._read_artifact(spec, run_dir, best_result)
+                    or best_result.code
+                    or attempt_holder[0]
+                )
+                self._observe(best_result, spec, run_dir)
+                self._checkpoint(runner.history, checkpoint_dir, round=iteration)
+                self._snapshot(
+                    runner.history, checkpoint_dir, run_dir,
+                    iteration=iteration, result=best_result,
+                )
+                if checkpoint_dir:
+                    emit_event(checkpoint_dir, ResearchEvent.CHECKPOINT_SAVED, {"round": iteration})
+                    emit_event(checkpoint_dir, ResearchEvent.SNAPSHOT_CREATED, {"iteration": iteration})
+            else:
+                # SEQUENTIAL: single hypothesis per iteration
+                # OPTIMIZE — propose revised attempt (SEPL: propose)
+                next_attempt = self._improve_attempt(llm, spec, attempt_holder[0], runner.history)
+                attempt_holder[0] = next_attempt
 
-            # Read on-disk artifact — worker may have refined it beyond the seed
-            actual_artifact = self._read_artifact(spec, run_dir, result) or next_attempt
+                # ACT — worker executes the attempt
+                result = runner.run_experiment(next_attempt, run_id=run_id, iteration=iteration)
+
+                # Read on-disk artifact — worker may have refined it beyond the seed
+                actual_artifact = self._read_artifact(spec, run_dir, result) or next_attempt
+
+                # OBSERVE + REMEMBER — extract and persist structured learning
+                self._observe(result, spec, run_dir)
+                self._checkpoint(runner.history, checkpoint_dir, round=iteration)
+                self._snapshot(runner.history, checkpoint_dir, run_dir, iteration=iteration, result=result)
+                if checkpoint_dir:
+                    emit_event(checkpoint_dir, ResearchEvent.CHECKPOINT_SAVED, {"round": iteration})
+                    emit_event(checkpoint_dir, ResearchEvent.SNAPSHOT_CREATED, {"iteration": iteration})
+
             attempt_holder[0] = actual_artifact
-
-            # OBSERVE + REMEMBER — extract and persist structured learning
-            self._observe(result, spec, run_dir)
-            self._checkpoint(runner.history, checkpoint_dir, round=iteration)
-            self._snapshot(runner.history, checkpoint_dir, run_dir, iteration=iteration, result=result)
 
             # SEPL: evaluate → keep/discard (handled by ExperimentRunner)
             # SEPL: rollback — restore best on-disk artifact, not the seed string
@@ -820,6 +895,178 @@ class ResearchSupervisor:
     # ------------------------------------------------------------------
     # Worker execution
     # ------------------------------------------------------------------
+
+    def _run_fan_out_iteration(
+        self,
+        spec: TaskSpec,
+        attempts: list[str],
+        run_id: str,
+        iteration: int,
+        time_budget_sec: int,
+        worker_toolsets: list[str] | None,
+        llm: Any,
+        history: ExperimentHistory,
+        keep_threshold: float = 0.0,
+    ) -> list[ExperimentResult]:
+        """Execute N workers in parallel via delegate_task batch mode.
+
+        Returns a list of ExperimentResult sorted by metric quality
+        (best first). All results are added to the provided history.
+        """
+        t0 = _time.monotonic()
+        run_dir = self._workspace / run_id
+        toolsets = worker_toolsets or spec.default_toolsets()
+        attempt_filename = _ATTEMPT_FILENAME.get(spec.task_type, "attempt.md")
+
+        # 1. Prepare N working directories
+        batch_dirs: list[Path] = []
+        for i, attempt in enumerate(attempts):
+            wd = run_dir / f"round-{run_id}-iter{iteration}-branch{i}"
+            wd.mkdir(parents=True, exist_ok=True)
+            batch_dirs.append(wd)
+            (wd / attempt_filename).write_text(attempt, encoding="utf-8")
+            brief = _build_task_brief(
+                spec,
+                iteration=iteration,
+                round_dir=str(wd),
+                time_budget_sec=time_budget_sec,
+            )
+            if self._evolution_overlay:
+                brief = self._evolution_overlay + "\n\n---\n\n" + brief
+            (wd / "task_brief.md").write_text(brief, encoding="utf-8")
+
+        # 2. Build tasks array for delegate_task batch
+        tasks: list[dict[str, Any]] = []
+        for i, wd in enumerate(batch_dirs):
+            context = (
+                f"Working directory: {wd}\n"
+                f"Topic: {spec.topic}\n"
+                f"Task type: {spec.task_type}\n"
+                f"Metric: {spec.metric_key} ({spec.metric_direction})\n"
+                f"Read task_brief.md for full instructions."
+            )
+            goal = (
+                f"You are a Hermes research worker (branch {i}/{len(attempts)}). "
+                f"Read program.md in {wd} and run the experiment. "
+                f"Report your result as:\n"
+                f"METRIC: {spec.metric_key}=<value> STATUS: improved|regressed|neutral "
+                f"NOTES: <one line summary>"
+            )
+            tasks.append({"goal": goal, "context": context})
+
+        # 3. Execute batch
+        try:
+            batch_result = _call_delegate_task_batch(
+                tasks=tasks,
+                parent_agent=self._parent_agent,
+                toolsets=toolsets,
+            )
+        except Exception as exc:
+            logger.exception("Fan-out batch delegate failed: %s", exc)
+            # Fallback: return all as failed
+            return [
+                ExperimentResult(
+                    run_id=run_id,
+                    iteration=iteration,
+                    code=attempt,
+                    metrics={},
+                    primary_metric=None,
+                    improved=False,
+                    kept=False,
+                    elapsed_sec=_time.monotonic() - t0,
+                    stdout="",
+                    stderr=str(exc),
+                    error=str(exc),
+                )
+                for attempt in attempts
+            ]
+
+        # 4. Parse each result
+        results: list[ExperimentResult] = []
+        current_best = (
+            history.best_result.primary_metric
+            if history.best_result
+            else None
+        )
+        entries = batch_result.get("results", [])
+        if len(entries) != len(attempts):
+            logger.warning(
+                "Fan-out result count mismatch: expected %d, got %d",
+                len(attempts), len(entries),
+            )
+
+        for i, attempt in enumerate(attempts):
+            entry = entries[i] if i < len(entries) else {}
+            wd = batch_dirs[i]
+            status = entry.get("status", "failed")
+            summary = entry.get("summary") or ""
+            error_str = entry.get("error") if entry.get("error") else None
+            if status != "completed" and not error_str:
+                error_str = f"Worker status: {status}"
+
+            # Parse metrics
+            parsed = _parser.parse(wd, stdout=summary)
+            metrics: dict[str, object] = dict(parsed.to_flat_metrics())
+
+            # LLM judge override
+            if spec.evaluation_mode == "llm_judge" and llm is not None and summary:
+                judge_score = self._score_with_llm_judge(summary, spec, llm)
+                if judge_score is not None:
+                    metrics[spec.metric_key] = judge_score
+
+            primary_metric = ExperimentRunner._to_float(
+                metrics.get(spec.metric_key)
+            )
+
+            improved = False
+            kept = False
+            if primary_metric is not None:
+                if current_best is None:
+                    improved = True
+                    kept = True
+                elif (
+                    (spec.metric_direction == "maximize" and primary_metric > current_best)
+                    or (spec.metric_direction == "minimize" and primary_metric < current_best)
+                ):
+                    improved = True
+                    kept = abs(primary_metric - current_best) > keep_threshold
+
+            # Token / cost data (best-effort)
+            _tokens = entry.get("tokens") or {}
+            _tokens_in = int(_tokens.get("input", 0)) if isinstance(_tokens.get("input"), (int, float)) else 0
+            _tokens_out = int(_tokens.get("output", 0)) if isinstance(_tokens.get("output"), (int, float)) else 0
+            _cost_usd = float(entry.get("_child_cost_usd", 0.0)) if isinstance(entry.get("_child_cost_usd"), (int, float)) else 0.0
+
+            result = ExperimentResult(
+                run_id=run_id,
+                iteration=iteration,
+                code=attempt,
+                metrics=metrics,
+                primary_metric=primary_metric,
+                improved=improved,
+                kept=kept,
+                elapsed_sec=entry.get("duration_seconds", 0),
+                stdout=summary,
+                stderr="",
+                error=error_str,
+                tokens_in=_tokens_in,
+                tokens_out=_tokens_out,
+                cost_usd=_cost_usd,
+            )
+
+            if kept:
+                history.best_result = result
+            history.add(result)
+            results.append(result)
+
+        # Sort by metric quality (best first)
+        def _score_key(r: ExperimentResult) -> float:
+            if r.primary_metric is None:
+                return float("-inf") if spec.metric_direction == "maximize" else float("inf")
+            return r.primary_metric
+
+        results.sort(key=_score_key, reverse=(spec.metric_direction == "maximize"))
+        return results
 
     def _run_worker(
         self,
@@ -1225,6 +1472,97 @@ class ResearchSupervisor:
     # ------------------------------------------------------------------
     # Autogenesis: Optimize — improvement proposal (Karpathy principles)
     # ------------------------------------------------------------------
+
+    def _fan_out_attempts(
+        self,
+        llm: Any,
+        spec: TaskSpec,
+        current_attempt: str,
+        history: ExperimentHistory,
+        n: int,
+    ) -> list[str]:
+        """Generate N diverse revision hypotheses for the current attempt.
+
+        Each variant targets a different bottleneck hypothesis so the
+        parallel batch can explore the solution space efficiently.
+        Returns a list of N attempt strings (may be fewer if the LLM
+        returns malformed output — callers must handle len < n).
+        """
+        last = history.results[-1] if history.results else None
+        best = history.best_result
+        last_metric = last.primary_metric if last else None
+        best_metric = best.primary_metric if best else None
+        last_stdout = last.stdout if last else ""
+
+        _DOMAIN_VERB = {
+            "code":     "Revise the code",
+            "search":   "Revise your search strategy, queries, or result ranking",
+            "research": "Deepen or reframe your research synthesis",
+            "generic":  "Revise your approach",
+        }
+        domain_verb = _DOMAIN_VERB.get(spec.task_type, "Revise your approach")
+
+        prompt = (
+            f"Task: {spec.topic}\n"
+            f"Deliverable: {spec.deliverable}\n"
+            f"Metric: {spec.metric_key} ({spec.metric_direction})\n"
+            f"Last score: {last_metric}\n"
+            f"Best score: {best_metric}\n"
+            f"Last worker output (excerpt):\n{last_stdout[:800]}\n\n"
+            "---\n\n"
+            "Current attempt:\n"
+            f"{current_attempt}\n\n"
+            "---\n\n"
+            f"Generate EXACTLY {n} diverse revisions of the attempt above. "
+            "Each revision must explore a DIFFERENT hypothesis for why the metric "
+            "is stuck and what change could move it.\n\n"
+            "Format your response as:\n"
+            "=== VARIANT 1 ===\n"
+            "[hypothesis: one sentence]\n"
+            "[full revised attempt]\n"
+            "=== VARIANT 2 ===\n"
+            "[hypothesis: one sentence]\n"
+            "[full revised attempt]\n"
+            "... and so on.\n\n"
+            f"{domain_verb}. Each variant must be a complete, standalone attempt."
+        )
+
+        system = (
+            f"You are a {spec.task_type} improvement specialist. "
+            "Generate N diverse hypotheses and revised attempts. "
+            "Be creative — each variant should try a genuinely different angle. "
+            "Never repeat the same change across variants."
+        )
+
+        try:
+            response = llm.chat([{"role": "user", "content": prompt}], system=system)
+        except Exception as exc:
+            logger.exception("Fan-out generation failed: %s", exc)
+            return [current_attempt]
+
+        content = getattr(response, "content", "")
+        if not isinstance(content, str) or not content.strip():
+            logger.warning("LLM returned empty fan-out; falling back to single attempt")
+            return [current_attempt]
+
+        # Parse === VARIANT N === blocks
+        variants: list[str] = []
+        for block in re.split(r"===\s*VARIANT\s*\d+\s*===", content):
+            block = block.strip()
+            if not block:
+                continue
+            # Drop the hypothesis line if it exists
+            lines = block.splitlines()
+            if lines and lines[0].lower().startswith("[hypothesis:"):
+                block = "\n".join(lines[1:]).strip()
+            if block:
+                variants.append(block)
+
+        # If parsing yields fewer than n, pad with the current attempt
+        while len(variants) < n:
+            variants.append(current_attempt)
+
+        return variants[:n]
 
     def _improve_attempt(
         self,
