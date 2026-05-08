@@ -103,3 +103,58 @@ Do NOT:
 - Run without a time guard (always implement elapsed-time check near 80% of budget)
 - Print non-metric lines as `key: value` (they will be parsed as metrics)
 - Use XML `<function_calls>` format — use JSON tool format instead
+
+## A/B Testing Strategies (HRM-110)
+
+The ``run_research`` tool supports comparing multiple research strategies on the same task via the ``strategies`` parameter.
+
+### Supported strategies
+
+| Strategy | `fan_out` | `use_moa` | Description |
+|----------|-----------|-----------|-------------|
+| Sequential | 1 | — | Baseline Karpathy loop: one hypothesis per iteration. |
+| Fan-out (no MOA) | N | False | N parallel workers per iteration; best branch kept. |
+| Fan-out + MOA | N | True | N parallel workers + Mixture-of-Agents aggregation into super-attempt. |
+
+### Tool usage example
+
+```json
+{
+  "topic": "Optimize binary search tree implementation",
+  "deliverable": "Python BST class with insert/search/delete",
+  "metric_key": "pass_rate",
+  "strategies": [
+    {"name": "sequential", "fan_out": 1, "max_iterations": 3},
+    {"name": "fanout3", "fan_out": 3, "use_moa": false, "max_iterations": 3},
+    {"name": "fanout3_moa", "fan_out": 3, "use_moa": true, "max_iterations": 3}
+  ],
+  "repeats": 1
+}
+```
+
+### Reported metrics
+
+The A/B test report includes per-strategy aggregates:
+
+- **Best metric** — mean ± std across repeats
+- **Improvement rate** — `(best - baseline) / baseline`
+- **Cost USD** — total LLM spend
+- **Time (s)** — wall-clock elapsed time
+- **Iterations** — rounds until early-stop or max
+- **Tokens** — input/output token counts
+
+### Programmatic API
+
+```python
+from agent.research.ab_testing import ResearchABTester, StrategyConfig
+from agent.research.supervisor import TaskSpec
+
+tester = ResearchABTester(parent_agent=agent, workspace=Path("/tmp/ab"))
+spec = TaskSpec(topic="...", deliverable="...", metric_key="accuracy")
+strategies = [
+    StrategyConfig(name="seq", fan_out=1),
+    StrategyConfig(name="fan3", fan_out=3, use_moa=False),
+]
+summaries = tester.compare(spec, strategies, repeats=2)
+print(tester.format_report(summaries))
+```
