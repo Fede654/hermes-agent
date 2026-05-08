@@ -313,7 +313,7 @@ def test_run_research_returns_cost_totals(monkeypatch):
     fake_supervisor.run.return_value = hist
 
     monkeypatch.setattr(
-        "agent.research.supervisor.ResearchSupervisor", lambda **kw: fake_supervisor
+        "tools.research_tool.ResearchSupervisor", lambda **kw: fake_supervisor
     )
     monkeypatch.setattr(
         "hermes_constants.get_hermes_home", lambda: Path(tempfile.gettempdir())
@@ -356,7 +356,7 @@ def test_run_research_backward_compat_no_cost_data(monkeypatch):
     fake_supervisor.run.return_value = hist
 
     monkeypatch.setattr(
-        "agent.research.supervisor.ResearchSupervisor", lambda **kw: fake_supervisor
+        "tools.research_tool.ResearchSupervisor", lambda **kw: fake_supervisor
     )
     monkeypatch.setattr(
         "hermes_constants.get_hermes_home", lambda: Path(tempfile.gettempdir())

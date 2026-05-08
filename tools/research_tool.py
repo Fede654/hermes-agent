@@ -17,6 +17,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
 
+# Import at module scope so unittest.mock.patch("tools.research_tool.ResearchSupervisor")
+# resolves correctly. Audit fix #5: previously imported inside run_research,
+# which broke patch-based tests.
+from agent.research.supervisor import ResearchSupervisor, TaskSpec
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -117,9 +122,14 @@ RESEARCH_TOOL_SCHEMA = {
                 "type": "integer",
                 "description": "Time budget per worker invocation in seconds (default: 300).",
             },
-            "lattice_task_id": {
+            "kanban_task_id": {
                 "type": "string",
-                "description": "Optional Lattice task ID to receive round-by-round progress comments.",
+                "description": (
+                    "Optional kanban task id (existing task). When set, run "
+                    "progress posts as comments and the task is transitioned "
+                    "to 'done' on completion. Caller must create the task; "
+                    "the tool does not auto-create."
+                ),
             },
             "strategies": {
                 "type": "array",
@@ -201,7 +211,7 @@ def run_research(
     initial_attempt: str = "",
     max_iterations: int = 3,
     time_budget_sec: int = 0,
-    lattice_task_id: Optional[str] = None,
+    kanban_task_id: Optional[str] = None,
     parent_agent: Any = None,
     checkpoint_dir: Optional[str] = None,
     timeout_sec: int = 0,
@@ -212,7 +222,6 @@ def run_research(
     if parent_agent is None:
         return json.dumps({"error": "run_research requires a parent_agent context."})
 
-    from agent.research.supervisor import ResearchSupervisor, TaskSpec
     from hermes_constants import get_hermes_home
 
     spec = TaskSpec(
@@ -228,6 +237,26 @@ def run_research(
 
     run_id = hashlib.sha1(f"{topic}:{time.time()}".encode()).hexdigest()[:12]
     workspace = get_hermes_home() / "research-workspace"
+
+    # Build the progress sink. Kanban (when task_id set) > Stub (default).
+    # db_path is captured NOW so subsequent KanbanSink calls don't re-resolve
+    # the active board mid-run.
+    if kanban_task_id:
+        from hermes_cli import kanban_db
+        from agent.research.sinks import KanbanSink
+        try:
+            db_path = kanban_db.kanban_db_path()
+            sink = KanbanSink(task_id=kanban_task_id, db_path=db_path)
+        except Exception as exc:
+            logger.warning(
+                "Failed to resolve kanban db_path for task %s: %s. "
+                "Falling back to log-only sink.", kanban_task_id, exc,
+            )
+            from agent.research.sinks import StubSink
+            sink = StubSink()
+    else:
+        from agent.research.sinks import StubSink
+        sink = StubSink()
 
     # A/B testing path
     if strategies:
@@ -247,7 +276,7 @@ def run_research(
         tester = ResearchABTester(
             parent_agent=parent_agent,
             workspace=workspace,
-            lattice_task_id=lattice_task_id,
+            progress_sink=sink,
             llm=_LLMBridge(),
         )
         try:
@@ -273,7 +302,7 @@ def run_research(
     supervisor = ResearchSupervisor(
         parent_agent=parent_agent,
         workspace=workspace,
-        lattice_task_id=lattice_task_id,
+        progress_sink=sink,
     )
 
     try:
@@ -392,7 +421,7 @@ registry.register(
         initial_attempt=args.get("initial_attempt", ""),
         max_iterations=args.get("max_iterations", 3),
         time_budget_sec=args.get("time_budget_sec", 0),
-        lattice_task_id=args.get("lattice_task_id"),
+        kanban_task_id=args.get("kanban_task_id"),
         parent_agent=kw.get("parent_agent"),
         checkpoint_dir=args.get("checkpoint_dir"),
         strategies=args.get("strategies"),
