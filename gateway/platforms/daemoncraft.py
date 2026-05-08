@@ -184,7 +184,8 @@ class DaemonCraftAdapter(BasePlatformAdapter):
         ws_url = self._bot_api_url.replace("http://", "ws://").replace("https://", "wss://") + "/ws"
         while not self._shutdown_event.is_set():
             try:
-                async with self._session.ws_connect(ws_url) as ws:
+                ssl_ctx = False if ws_url.startswith("ws://") else None
+                async with self._session.ws_connect(ws_url, ssl=ssl_ctx) as ws:
                     self._ws_retry_count = 0
                     logger.info("[DaemonCraft] WebSocket connected")
                     while not self._shutdown_event.is_set():
