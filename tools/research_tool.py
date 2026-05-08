@@ -117,6 +117,29 @@ RESEARCH_TOOL_SCHEMA = {
                 "type": "string",
                 "description": "Optional Lattice task ID to receive round-by-round progress comments.",
             },
+            "strategies": {
+                "type": "array",
+                "description": (
+                    "Optional A/B test strategies. If provided, runs each strategy "
+                    "and returns a comparison table instead of a single run. "
+                    "Each item is an object with: name, fan_out (int), use_moa (bool), max_iterations (int)."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "fan_out": {"type": "integer", "default": 1},
+                        "use_moa": {"type": "boolean", "default": True},
+                        "max_iterations": {"type": "integer", "default": 3},
+                    },
+                    "required": ["name"],
+                },
+            },
+            "repeats": {
+                "type": "integer",
+                "description": "Number of repeats per strategy when running A/B tests (default: 1).",
+                "default": 1,
+            },
         },
         "required": ["topic", "deliverable", "metric_key"],
     },
@@ -168,6 +191,8 @@ def run_research(
     parent_agent: Any = None,
     checkpoint_dir: Optional[str] = None,
     timeout_sec: int = 0,
+    strategies: Optional[list[dict[str, Any]]] = None,
+    repeats: int = 1,
 ) -> str:
     if parent_agent is None:
         return json.dumps({"error": "run_research requires a parent_agent context."})
@@ -189,6 +214,47 @@ def run_research(
     run_id = hashlib.sha1(f"{topic}:{time.time()}".encode()).hexdigest()[:12]
     workspace = get_hermes_home() / "research-workspace"
 
+    # A/B testing path
+    if strategies:
+        from agent.research.ab_testing import ResearchABTester, StrategyConfig
+
+        strategy_configs = [
+            StrategyConfig(
+                name=s.get("name", f"strategy-{i}"),
+                fan_out=s.get("fan_out", 1),
+                use_moa=s.get("use_moa", True),
+                max_iterations=s.get("max_iterations", max_iterations),
+                time_budget_sec=time_budget_sec,
+            )
+            for i, s in enumerate(strategies)
+        ]
+
+        tester = ResearchABTester(
+            parent_agent=parent_agent,
+            workspace=workspace,
+            lattice_task_id=lattice_task_id,
+            llm=_LLMBridge(),
+        )
+        try:
+            summaries = tester.compare(
+                spec,
+                strategy_configs,
+                initial_attempt=initial_attempt,
+                repeats=repeats,
+                run_prefix=run_id,
+            )
+        except Exception as exc:
+            logger.exception("A/B test failed for run_id=%s: %s", run_id, exc)
+            return json.dumps({"error": str(exc), "run_id": run_id})
+
+        return json.dumps({
+            "run_id": run_id,
+            "ab_test": True,
+            "report": tester.format_report(summaries),
+            "json": json.loads(tester.to_json(summaries)),
+        }, indent=2)
+
+    # Single-run path
     supervisor = ResearchSupervisor(
         parent_agent=parent_agent,
         workspace=workspace,
@@ -313,6 +379,8 @@ registry.register(
         lattice_task_id=args.get("lattice_task_id"),
         parent_agent=kw.get("parent_agent"),
         checkpoint_dir=args.get("checkpoint_dir"),
+        strategies=args.get("strategies"),
+        repeats=args.get("repeats", 1),
     ),
     check_fn=_check_research_requirements,
     emoji="🔬",
