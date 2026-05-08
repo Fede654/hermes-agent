@@ -11,20 +11,38 @@ The `ResearchSupervisor` already routes every progress event through one closure
 
 ---
 
-## Audit corrections (Codex 2026-05-08)
+## Audit corrections (Codex 2026-05-08) + lattice prune decision
 
-Codex flagged the following before implementation. All corrections are reflected in the tasks below:
+Codex flagged the original draft as MAJOR_REVISIONS_NEEDED. After audit + a
+direct user decision to fully prune lattice (no `LatticeSink` shim), the
+plan now reflects:
 
-1. **`KanbanSink` does NOT create the kanban task.** Caller creates the task; sink only appends comments and transitions status. Overview clarified.
-2. **`ResearchSupervisor.__init__` is keyword-only and `workspace: Path | None = None` with `lattice_root=str(get_hermes_home() / "org")`.** Task 4 preserves these.
-3. **`ExperimentRunner.__init__` keeps `*` before `delegate_fn` and the `self.workspace.mkdir(parents=True, exist_ok=True)` call.** Task 5 preserves these.
-4. **The `if llm is None:` early-return path (supervisor.py:791) must call `self._sink.run_completed(...)` before returning.** Task 4 covers this.
-5. **`_reflect()` (supervisor.py:1489) takes `lattice_comment_fn` as a parameter and uses it 3 times. Migrate the call site at supervisor.py:952 to pass `self._sink.comment` and the parameter remains a `Callable[[str], None]` (sink-agnostic).** Task 4 covers this.
-6. **`run_research()` imports `ResearchSupervisor` inside the function (`tools/research_tool.py:215, 258`). Task 6 moves the import to module scope so tests can `patch("tools.research_tool.ResearchSupervisor")`.**
-7. **The registry handler lambda (`tools/research_tool.py:388-401`) enumerates forwarded args manually. Task 6 adds `kanban_task_id=args.get("kanban_task_id")` there.**
-8. **`KanbanSink` takes a `db_path: Path` (captured at construction), not a borrowed `Connection`. It opens short-lived connections per call.** This avoids sqlite3 thread-affinity issues and dispatcher races. Task 3 adopts this design.
-9. **`KanbanSink` accepts `complete_on_run_completed: bool = True`.** A/B testing constructs sub-sinks with `complete_on_run_completed=False` and the `ResearchABTester` calls `complete_task` once at the end. Task 7 covers this.
-10. **Pytest fixture uses `HERMES_KANBAN_DB` env var (highest-precedence path resolver in `kanban_db_path`) and skips `init_db(conn)` (which takes a Path, not Connection). `connect()` already auto-initializes the schema.** Task 3 adopts this fixture shape.
+1. **`KanbanSink` does NOT create the kanban task.** Caller creates the task; sink only appends comments and transitions status.
+2. **No `LatticeSink`.** Lattice is pruned entirely. `lattice_task_id` parameter is removed from supervisor / runner / tools / ABTester. Anyone passing it gets a `TypeError`.
+3. **`_make_lattice_comment_fn` is deleted.** Free-form comments now flow through `self._sink.comment` (which for the default `StubSink` is a `logger.info`, and for `KanbanSink` is a kanban comment).
+4. **`ResearchSupervisor.__init__` is keyword-only and `workspace: Path | None = None`.** Task 4 preserves the keyword-only contract; `lattice_task_id` and `lattice_root` parameters are dropped.
+5. **`ExperimentRunner.__init__` keeps `*` before `delegate_fn` and the `self.workspace.mkdir(parents=True, exist_ok=True)` call.** Task 5 preserves these; `lattice_comment_fn` parameter is dropped.
+6. **The `if llm is None:` early-return path (supervisor.py:791) must call `self._sink.run_completed(...)` before returning.** Task 4 covers this.
+7. **`_reflect()` (supervisor.py:1489) takes a `comment_fn` parameter (renamed from `lattice_comment_fn`).** The call site passes `self._sink.comment`.
+8. **`run_research()` imports `ResearchSupervisor` at module scope.** Required for `unittest.mock.patch("tools.research_tool.ResearchSupervisor")` to bind. Task 6.
+9. **The registry handler lambda forwards `kanban_task_id`.** Task 6.
+10. **`KanbanSink` takes `db_path: Path` (captured at construction), not a borrowed `Connection`. Opens short-lived connections per call.** Avoids sqlite3 thread-affinity issues and dispatcher races. Task 2 (was Task 3 in original numbering).
+11. **`KanbanSink` accepts `complete_on_run_completed: bool = True`.** A/B testing constructs sub-sinks with `False`; `ResearchABTester` closes the parent task once at the end. Task 6 (was Task 7).
+12. **Pytest fixture uses `HERMES_KANBAN_DB` env var (highest-precedence path resolver). `connect()` auto-initializes the schema.**
+
+### Renumbered task list (post-prune)
+
+| New # | Old # | What |
+|---|---|---|
+| 1 | 1 | `ProgressSink` Protocol + `StubSink` |
+| 2 | 3 | `KanbanSink` (was Task 3) |
+| 3 | 4 | Wire supervisor to `ProgressSink`, drop `lattice_task_id`/`lattice_root`, delete `_make_lattice_comment_fn` |
+| 4 | 5 | Wire runner to `ProgressSink`, drop `lattice_comment_fn` parameter |
+| 5 | 6 | `run_research(kanban_task_id=...)` + drop `lattice_task_id` from schema/handler/A/B branch |
+| 6 | 7 | `research_job` schema cleanup + `ResearchABTester` accepts sink + child sinks suppress complete |
+| 7 | 8 | Validation harness against real kanban DB |
+
+Old Task 2 (`LatticeSink`) is removed entirely. The line counts and verifications below still reference the Task 4/Task 5/Task 6/Task 7 headings; treat those as Task 3/4/5/6 in the renumbered scheme.
 
 ---
 
