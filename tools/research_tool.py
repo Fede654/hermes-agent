@@ -77,8 +77,12 @@ RESEARCH_TOOL_SCHEMA = {
             "acceptance_criterion": {
                 "type": "string",
                 "description": (
-                    "Optional stopping criterion. Loop ends early if met. "
-                    "E.g. 'pass_rate >= 0.95', 'relevance_score >= 0.8'."
+                    "Optional stopping criterion. When parseable as "
+                    "'<metric> <op> <number>' (op: >=, <=, >, <, ==), the loop "
+                    "exits as soon as the latest iteration's metric satisfies it. "
+                    "Qualitative criteria (free-form text) are passed to the worker "
+                    "via the brief but do not auto-terminate the loop. "
+                    "E.g. 'pass_rate >= 0.95', 'latency_ms < 200'."
                 ),
             },
             "evaluation_mode": {
@@ -140,6 +144,16 @@ RESEARCH_TOOL_SCHEMA = {
                 "description": "Number of repeats per strategy when running A/B tests (default: 1).",
                 "default": 1,
             },
+            "disable_evolution_overlay": {
+                "type": "boolean",
+                "description": (
+                    "If true, do not prepend cross-run lessons from "
+                    "$HERMES_HOME/evolution to the worker brief. Useful for "
+                    "isolated tests, CI runs, or first-time tasks where the "
+                    "global lesson store would only add noise. Default: false."
+                ),
+                "default": False,
+            },
         },
         "required": ["topic", "deliverable", "metric_key"],
     },
@@ -193,6 +207,7 @@ def run_research(
     timeout_sec: int = 0,
     strategies: Optional[list[dict[str, Any]]] = None,
     repeats: int = 1,
+    disable_evolution_overlay: bool = False,
 ) -> str:
     if parent_agent is None:
         return json.dumps({"error": "run_research requires a parent_agent context."})
@@ -270,6 +285,7 @@ def run_research(
             time_budget_sec=time_budget_sec,
             llm=_LLMBridge(),
             checkpoint_dir=Path(checkpoint_dir) if checkpoint_dir else None,
+            disable_evolution_overlay=disable_evolution_overlay,
         )
     except Exception as exc:
         logger.exception("run_research failed for run_id=%s: %s", run_id, exc)

@@ -342,6 +342,44 @@ _ATTEMPT_FILENAME: dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
+# Acceptance criterion parser
+# ---------------------------------------------------------------------------
+
+import operator as _operator
+
+_ACCEPTANCE_OPS = {
+    ">=": _operator.ge,
+    "<=": _operator.le,
+    ">": _operator.gt,
+    "<": _operator.lt,
+    "==": _operator.eq,
+}
+
+_ACCEPTANCE_RE = re.compile(
+    r"^\s*(?:[\w.]+\s*)?(>=|<=|>|<|==)\s*([-+]?\d+(?:\.\d+)?)\s*$"
+)
+
+
+def _parse_acceptance_criterion(criterion: str) -> Optional[Callable[[float], bool]]:
+    """Parse a textual acceptance criterion into a predicate over the metric.
+
+    Accepts forms like ``"pass_rate >= 0.9"``, ``">= 0.9"``, ``"latency_ms < 200"``.
+    The metric-key prefix is optional and is not validated against the spec —
+    callers already know which metric they're testing. Returns ``None`` if the
+    criterion can't be parsed (e.g. qualitative text), so the loop falls back
+    to the original max_iterations / time_budget termination.
+    """
+    if not criterion:
+        return None
+    m = _ACCEPTANCE_RE.match(criterion)
+    if not m:
+        return None
+    op = _ACCEPTANCE_OPS[m.group(1)]
+    threshold = float(m.group(2))
+    return lambda value: op(value, threshold)
+
+
+# ---------------------------------------------------------------------------
 # delegate_task bridge
 # ---------------------------------------------------------------------------
 
@@ -627,6 +665,7 @@ class ResearchSupervisor:
         checkpoint_dir: Path | None = None,
         fan_out: int = 1,
         use_moa: bool = True,
+        disable_evolution_overlay: bool = False,
     ) -> ExperimentHistory:
         """Run the Karpathy loop for any TaskSpec.
 
@@ -662,11 +701,17 @@ class ResearchSupervisor:
         # Failure must not break the loop — overlay is best-effort. The helper
         # already catches its own errors, but wrap here too as defense in depth
         # (matches the _evolve call site at the bottom of run()).
-        try:
-            self._evolution_overlay = self._load_evolution_overlay()
-        except Exception as exc:
-            logger.warning("Evolution overlay load failed at run start: %s", exc)
+        # When disable_evolution_overlay is True, skip entirely — useful for
+        # mechanics tests, isolated runs, and CI where global state from
+        # ~/.hermes/evolution would leak into the worker brief.
+        if disable_evolution_overlay:
             self._evolution_overlay = ""
+        else:
+            try:
+                self._evolution_overlay = self._load_evolution_overlay()
+            except Exception as exc:
+                logger.warning("Evolution overlay load failed at run start: %s", exc)
+                self._evolution_overlay = ""
 
         toolsets = worker_toolsets or spec.default_toolsets()
         attempt_holder: list[str] = [initial_attempt]
@@ -734,8 +779,8 @@ class ResearchSupervisor:
             baseline_artifact = self._read_artifact(spec, run_dir, baseline) or initial_attempt
             attempt_holder[0] = baseline_artifact
             best_artifact_holder = [baseline_artifact]
-            # --- OBSERVE ---
-            self._observe(baseline, spec, run_dir)
+            # --- OBSERVE --- (no previous best for the baseline iteration)
+            self._observe(baseline, spec, run_dir, previous_best=None)
             self._checkpoint(runner.history, checkpoint_dir, round=0)
             self._snapshot(runner.history, checkpoint_dir, run_dir, iteration=0, result=baseline)
             if checkpoint_dir:
@@ -774,6 +819,13 @@ class ResearchSupervisor:
         # Autogenesis AOOR improvement loop
         no_improvement = 0
         for iteration in range(start_iteration, max_iterations + 1):
+            # Capture best metric BEFORE this iteration runs so _observe can
+            # tell plateau (equal to best) from regression (worse than best).
+            _prev_best = (
+                runner.history.best_result.primary_metric
+                if runner.history.best_result is not None
+                else None
+            )
             if fan_out > 1:
                 # HYPOTHESIS FAN-OUT (HRM-108): generate N variants and run in parallel
                 lattice_comment_fn(
@@ -820,7 +872,7 @@ class ResearchSupervisor:
                         f"Fan-out best branch: using branch 1/{len(results)} (no MOA)"
                     )
                     actual_artifact = self._read_artifact(spec, run_dir, best_result) or best_result.code or attempt_holder[0]
-                self._observe(best_result, spec, run_dir)
+                self._observe(best_result, spec, run_dir, previous_best=_prev_best)
                 self._checkpoint(runner.history, checkpoint_dir, round=iteration)
                 self._snapshot(
                     runner.history, checkpoint_dir, run_dir,
@@ -842,7 +894,7 @@ class ResearchSupervisor:
                 actual_artifact = self._read_artifact(spec, run_dir, result) or next_attempt
 
                 # OBSERVE + REMEMBER — extract and persist structured learning
-                self._observe(result, spec, run_dir)
+                self._observe(result, spec, run_dir, previous_best=_prev_best)
                 self._checkpoint(runner.history, checkpoint_dir, round=iteration)
                 self._snapshot(runner.history, checkpoint_dir, run_dir, iteration=iteration, result=result)
                 if checkpoint_dir:
@@ -872,6 +924,24 @@ class ResearchSupervisor:
             else:
                 no_improvement += 1
                 attempt_holder[0] = best_artifact_holder[0]  # rollback to best artifact
+
+            # Acceptance-criterion early termination: if the metric crosses a
+            # parseable threshold (e.g. "pass_rate >= 0.9"), stop iterating —
+            # we've delivered the contract. Qualitative criteria are ignored
+            # here and continue to fall through to max_iterations / no-improve.
+            if result.primary_metric is not None and spec.acceptance_criterion:
+                acceptance_test = _parse_acceptance_criterion(spec.acceptance_criterion)
+                if acceptance_test is not None and acceptance_test(result.primary_metric):
+                    logger.info(
+                        "Acceptance criterion met for %s: '%s' (got %s=%s)",
+                        run_id, spec.acceptance_criterion,
+                        spec.metric_key, result.primary_metric,
+                    )
+                    lattice_comment_fn(
+                        f"Acceptance criterion met: '{spec.acceptance_criterion}' "
+                        f"({spec.metric_key}={result.primary_metric})"
+                    )
+                    break
 
             if no_improvement >= early_stop_limit:
                 logger.info(
@@ -1215,25 +1285,50 @@ class ResearchSupervisor:
         result: ExperimentResult,
         spec: TaskSpec,
         run_dir: Path,
+        *,
+        previous_best: Optional[float] = None,
     ) -> None:
         """Extract a structured learning from a completed round and append to learnings.jsonl.
 
         Schema mirrors Autogenesis HeartbeatMemorySystem:
-          type       — "improvement" | "regression" | "failure"
+          type       — "improvement" | "regression" | "neutral" | "failure"
           key        — metric name being optimized
           insight    — one-line summary of what happened and why
           confidence — metric value (0.0 if unavailable)
           source     — "iter-N" for lineage tracing
+
+        Classification:
+          - failure     — primary_metric is None (worker failed / unparseable)
+          - improvement — strictly better than the previous best
+          - regression  — strictly worse than the previous best
+          - neutral     — equal to (or first-seen against unknown) previous best
+
+        ``previous_best`` is the best metric value before this iteration ran;
+        used to distinguish plateau from regression. When omitted or None,
+        the classifier falls back to the binary improved/regression split for
+        backwards compatibility.
 
         Insight extraction priority:
           1. results.json (structured, most reliable)
           2. NOTES: field from METRIC line in stdout
           3. Raw stdout excerpt (last resort)
         """
-        if result.primary_metric is not None:
-            entry_type = "improvement" if result.improved else "regression"
-        else:
+        if result.primary_metric is None:
             entry_type = "failure"
+        elif result.improved:
+            entry_type = "improvement"
+        elif previous_best is not None:
+            # Plateau (within float tolerance) is distinct from regression.
+            if abs(result.primary_metric - previous_best) < 1e-9:
+                entry_type = "neutral"
+            elif spec.metric_direction == "minimize":
+                entry_type = "regression" if result.primary_metric > previous_best else "neutral"
+            else:
+                entry_type = "regression" if result.primary_metric < previous_best else "neutral"
+        else:
+            # No prior best to compare against: treat non-improvement as neutral
+            # rather than asserting regression on the first round.
+            entry_type = "neutral"
 
         round_dir = run_dir / f"round-{result.run_id}-iter{result.iteration}"
 
