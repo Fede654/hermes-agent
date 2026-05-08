@@ -379,3 +379,153 @@ class TestFanOutIntegration:
                 )
 
         mock_batch.assert_not_called()
+
+
+class TestAggregateAttempts:
+    """_aggregate_attempts synthesizes N fan-out results into a super-attempt."""
+
+    def test_aggregate_combines_branches(self, mock_llm, mock_parent_agent, tmp_workspace, code_spec):
+        mock_llm.chat.return_value = MagicMock(
+            content="# Super-attempt combining quicksort + mergesort insights\n"
+                    "def sort_array(arr): return sorted(arr, key=len)\n"
+        )
+
+        supervisor = ResearchSupervisor(
+            parent_agent=mock_parent_agent,
+            workspace=tmp_workspace,
+        )
+        results = [
+            ExperimentResult(
+                run_id="r1", iteration=1, code="code A",
+                metrics={"accuracy": 0.8}, primary_metric=0.8,
+                improved=True, kept=True, elapsed_sec=1.0,
+                stdout="worker A output", stderr="",
+            ),
+            ExperimentResult(
+                run_id="r1", iteration=1, code="code B",
+                metrics={"accuracy": 0.7}, primary_metric=0.7,
+                improved=False, kept=False, elapsed_sec=1.0,
+                stdout="worker B output", stderr="",
+            ),
+        ]
+
+        aggregated = supervisor._aggregate_attempts(
+            mock_llm, code_spec, results, "original_best"
+        )
+
+        assert "Super-attempt" in aggregated or "sorted" in aggregated
+        # LLM should have been called with branch summaries
+        prompt = mock_llm.chat.call_args[0][0][0]["content"]
+        assert "BRANCH 1" in prompt
+        assert "BRANCH 2" in prompt
+        assert "worker A output" in prompt
+        assert "worker B output" in prompt
+
+    def test_aggregate_fallback_on_llm_error(
+        self, mock_llm, mock_parent_agent, tmp_workspace, code_spec
+    ):
+        mock_llm.chat.side_effect = RuntimeError("API failure")
+
+        supervisor = ResearchSupervisor(
+            parent_agent=mock_parent_agent,
+            workspace=tmp_workspace,
+        )
+        results = [
+            ExperimentResult(
+                run_id="r1", iteration=1, code="best_code",
+                metrics={"accuracy": 0.8}, primary_metric=0.8,
+                improved=True, kept=True, elapsed_sec=1.0,
+                stdout="ok", stderr="",
+            ),
+        ]
+
+        aggregated = supervisor._aggregate_attempts(
+            mock_llm, code_spec, results, "original_best"
+        )
+
+        # Fallback to best branch code
+        assert aggregated == "best_code"
+
+    def test_aggregate_fallback_on_empty_results(
+        self, mock_llm, mock_parent_agent, tmp_workspace, code_spec
+    ):
+        supervisor = ResearchSupervisor(
+            parent_agent=mock_parent_agent,
+            workspace=tmp_workspace,
+        )
+
+        aggregated = supervisor._aggregate_attempts(
+            mock_llm, code_spec, [], "original_best"
+        )
+
+        assert aggregated == "original_best"
+
+
+class TestMoaIntegration:
+    """Integration tests for MOA aggregation in the fan-out loop."""
+
+    def test_run_with_fan_out_uses_aggregated_attempt(
+        self, mock_llm, mock_parent_agent, tmp_workspace, code_spec
+    ):
+        """When fan_out > 1, the next iteration starts from the aggregated attempt."""
+        # First call: fan_out generation, Second call: MOA aggregation
+        mock_llm.chat.side_effect = [
+            MagicMock(
+                content=(
+                    "=== VARIANT 1 ===\n[hypothesis: A]\ncode A\n"
+                    "=== VARIANT 2 ===\n[hypothesis: B]\ncode B\n"
+                )
+            ),
+            MagicMock(content="aggregated super code"),
+        ]
+
+        def fake_batch(tasks, **kwargs):
+            results = []
+            for i, _ in enumerate(tasks):
+                acc = 0.7 if i == 0 else 0.8
+                results.append({
+                    "task_index": i,
+                    "status": "completed",
+                    "summary": f"METRIC: accuracy={acc} STATUS: improved NOTES: ok",
+                    "error": None,
+                    "duration_seconds": 1.0,
+                })
+            return {"results": results}
+
+        with patch(
+            "agent.research.supervisor._call_delegate_task_batch",
+            side_effect=fake_batch,
+        ), patch.object(ResearchSupervisor, "_observe"), patch.object(
+            ResearchSupervisor, "_checkpoint"
+        ), patch.object(ResearchSupervisor, "_snapshot"):
+            supervisor = ResearchSupervisor(
+                parent_agent=mock_parent_agent,
+                workspace=tmp_workspace,
+            )
+            with patch(
+                "agent.research.supervisor._call_delegate_task",
+                return_value={
+                    "results": [{
+                        "status": "completed",
+                        "summary": "METRIC: accuracy=0.5 STATUS: neutral NOTES: baseline",
+                    }]
+                },
+            ):
+                history = supervisor.run(
+                    code_spec,
+                    initial_attempt="def sort_array(arr): pass",
+                    run_id="moa-test",
+                    max_iterations=1,
+                    llm=mock_llm,
+                    fan_out=2,
+                )
+
+        # The aggregated attempt should be written to the workspace for the next
+        # iteration (even though there is no next iteration in this test).
+        # We verify the LLM was called twice: once for fan-out, once for MOA.
+        assert mock_llm.chat.call_count == 2
+        # Second call should be the aggregation prompt
+        second_prompt = mock_llm.chat.call_args_list[1][0][0][0]["content"]
+        assert "Synthesis Instructions (MOA)" in second_prompt
+        assert "BRANCH 1" in second_prompt
+        assert "BRANCH 2" in second_prompt

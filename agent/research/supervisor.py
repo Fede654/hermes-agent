@@ -801,11 +801,17 @@ class ResearchSupervisor:
                     continue
 
                 result = best_result
-                actual_artifact = (
-                    self._read_artifact(spec, run_dir, best_result)
-                    or best_result.code
-                    or attempt_holder[0]
+                # MOA-style aggregation (HRM-109): synthesize all branches into
+                # a super-attempt that combines the best ideas from each branch.
+                # The aggregated attempt becomes the seed for the next iteration,
+                # while the best branch's metric determines if this round improved.
+                lattice_comment_fn(
+                    f"MOA aggregation: synthesizing {len(results)} branches"
                 )
+                aggregated_attempt = self._aggregate_attempts(
+                    llm, spec, results, best_artifact_holder[0]
+                )
+                actual_artifact = aggregated_attempt
                 self._observe(best_result, spec, run_dir)
                 self._checkpoint(runner.history, checkpoint_dir, round=iteration)
                 self._snapshot(
@@ -1563,6 +1569,86 @@ class ResearchSupervisor:
             variants.append(current_attempt)
 
         return variants[:n]
+
+    def _aggregate_attempts(
+        self,
+        llm: Any,
+        spec: TaskSpec,
+        results: list[ExperimentResult],
+        current_best_attempt: str,
+    ) -> str:
+        """Synthesize N fan-out results into a single super-attempt (MOA-style).
+
+        Rather than keeping only the best branch, analyze what worked in each
+        branch and produce a merged attempt that is better than any individual.
+        Falls back to the best individual result if synthesis fails.
+        """
+        if not results:
+            return current_best_attempt
+
+        # Build a ranked summary of each branch
+        branches: list[str] = []
+        for i, r in enumerate(results):
+            metric_str = f"{r.primary_metric:.4f}" if r.primary_metric is not None else "N/A"
+            branches.append(
+                f"--- BRANCH {i+1} (metric={metric_str}) ---\n"
+                f"Attempt:\n{r.code[:800]}\n\n"
+                f"Worker output:\n{r.stdout[:400]}\n"
+            )
+
+        branches_text = "\n\n".join(branches)
+
+        prompt = (
+            f"Task: {spec.topic}\n"
+            f"Deliverable: {spec.deliverable}\n"
+            f"Metric: {spec.metric_key} ({spec.metric_direction})\n\n"
+            "You just ran N parallel experiments with different hypotheses. "
+            "Here are the results, ranked from best to worst:\n\n"
+            f"{branches_text}\n\n"
+            "---\n\n"
+            "Current best attempt (before this round):\n"
+            f"{current_best_attempt}\n\n"
+            "---\n\n"
+            "## Synthesis Instructions (MOA)\n\n"
+            "Analyze each branch:\n"
+            "1. What specific change in this branch helped or hurt the metric?\n"
+            "2. Is there any idea here worth incorporating into the final attempt, "
+            "even if the branch itself underperformed?\n\n"
+            "Then produce a SINGLE merged attempt that:\n"
+            "- Starts from the current best attempt\n"
+            "- Incorporates the best ideas from ALL branches (not just the winner)\n"
+            "- Avoids the pitfalls you identified in weaker branches\n"
+            "- Is a complete, standalone deliverable\n\n"
+            "Return ONLY the merged attempt. "
+            "Include a brief comment at the top summarizing what you borrowed from each branch."
+        )
+
+        system = (
+            f"You are a {spec.task_type} synthesis specialist. "
+            "You combine multiple partial solutions into one superior solution. "
+            "Be selective — don't merge blindly. Only incorporate changes that "
+            "directly serve the metric."
+        )
+
+        try:
+            response = llm.chat([{"role": "user", "content": prompt}], system=system)
+        except Exception as exc:
+            logger.exception("MOA aggregation failed: %s", exc)
+            # Fallback: return the best individual result
+            return results[0].code if results else current_best_attempt
+
+        candidate = getattr(response, "content", "")
+        if not isinstance(candidate, str) or not candidate.strip():
+            logger.warning("LLM returned empty aggregation; using best branch")
+            return results[0].code if results else current_best_attempt
+
+        # For code tasks, extract from code fence if present
+        if spec.task_type == "code":
+            from agent.research.runner import ExperimentRunner
+            extracted = ExperimentRunner._extract_python_code(candidate)
+            return extracted if extracted.strip() else candidate.strip()
+
+        return candidate.strip()
 
     def _improve_attempt(
         self,
