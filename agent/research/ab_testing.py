@@ -168,21 +168,44 @@ class ResearchABTester:
         parent_agent: Any,
         workspace: Path,
         *,
-        lattice_task_id: Optional[str] = None,
+        progress_sink: Optional[Any] = None,
         llm: Any = None,
     ) -> None:
         self.parent_agent = parent_agent
         self.workspace = workspace
-        self.lattice_task_id = lattice_task_id
         self.llm = llm
         self._ab_test_dir = workspace / "ab-tests"
         self._ab_test_dir.mkdir(parents=True, exist_ok=True)
 
+        # Resolve parent sink. The tester owns the close-on-completion;
+        # per-strategy sub-sinks must NOT call complete_task themselves
+        # (otherwise the first strategy closes the parent kanban task and
+        # subsequent strategies comment on a closed task).
+        if progress_sink is None:
+            from agent.research.sinks import StubSink
+            self._parent_sink = StubSink()
+        else:
+            self._parent_sink = progress_sink
+
     def _make_supervisor(self) -> ResearchSupervisor:
+        # Per-strategy child sink: same identity as the parent sink, but
+        # with run_completed-driven task completion suppressed. We only
+        # know how to do this for KanbanSink; other sinks are passed
+        # through unchanged (Stub is idempotent).
+        from agent.research.sinks import KanbanSink
+        if isinstance(self._parent_sink, KanbanSink):
+            child_sink = KanbanSink(
+                task_id=self._parent_sink._task_id,
+                db_path=self._parent_sink._db_path,
+                complete_on_run_completed=False,
+            )
+        else:
+            child_sink = self._parent_sink
+
         return ResearchSupervisor(
             parent_agent=self.parent_agent,
             workspace=self.workspace,
-            lattice_task_id=self.lattice_task_id,
+            progress_sink=child_sink,
         )
 
     def _run_single(
@@ -254,6 +277,21 @@ class ResearchABTester:
                 run.repeat = repeat
                 summary.runs.append(run)
             summaries.append(summary)
+
+        # Close the parent kanban task ONCE, after all strategies+repeats
+        # are done. Sub-sinks ran with complete_on_run_completed=False so
+        # the task stayed open through every strategy's run_completed.
+        # We pass the LAST strategy's last run history as the "summary
+        # history"; the sink's run_completed only consumes results count
+        # and best_metric for the closing comment, both of which are
+        # representative enough for the close.
+        last_history = (
+            summaries[-1].runs[-1].history
+            if summaries and summaries[-1].runs
+            else None
+        )
+        if last_history is not None:
+            self._parent_sink.run_completed(last_history)
         return summaries
 
     @staticmethod
