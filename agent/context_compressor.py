@@ -910,6 +910,16 @@ Be specific with file paths, commands, line numbers, and results.]
 Target ~{summary_budget} tokens. Be CONCRETE — include file paths, command outputs, error messages, line numbers, and specific values. Avoid vague descriptions like "made some changes" — say exactly what changed.
 
 Write only the summary body. Do not include any preamble or prefix."""
+
+        # Honour caller overrides (set via summary_preamble / summary_template
+        # kwargs at construction); fall back to the defaults defined above.
+        preamble = self.summary_preamble or _summarizer_preamble
+        template = self.summary_template or _template_sections
+        # Custom templates may include {summary_budget} as a placeholder. The
+        # default template is already an f-string and has no placeholders left.
+        if self.summary_template and "{summary_budget}" in template:
+            template = template.replace("{summary_budget}", str(summary_budget))
+
         if self._previous_summary:
             # Iterative update: preserve existing info, add new progress
             prompt = f"""{preamble}
