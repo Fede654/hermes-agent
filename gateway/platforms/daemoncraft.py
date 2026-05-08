@@ -16,6 +16,7 @@ Hermescraft (Mineflayer) and Mindcraft sidecar bodies.
 """
 
 import asyncio
+import datetime as _dt
 import hashlib
 import json
 import logging
@@ -25,6 +26,7 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Deque, Dict, Optional, Set
 
 import aiohttp
@@ -231,6 +233,8 @@ class DaemonCraftAdapter(BasePlatformAdapter):
         elif msg_type == "heartbeat_context":
             data = payload.get("data", {})
             await self._handle_heartbeat_context(data)
+        elif msg_type == "action_result":
+            await self._handle_action_result(payload)
         elif msg_type == "interrupt":
             # Loop-to-gateway interrupt acknowledgment — no action needed
             pass
@@ -383,6 +387,30 @@ class DaemonCraftAdapter(BasePlatformAdapter):
             raw_message=data,
         )
         await self.handle_message(event)
+
+    async def _handle_action_result(self, payload: dict) -> None:
+        """Forward action_result events through transform_tool_result hooks.
+
+        Lets plugins (e.g. altercraft scene-graph memory) record construction
+        and adventure episodes from sidecar action_result WS events.
+        """
+        try:
+            from hermes_cli.plugins import invoke_hook
+            result_str = json.dumps(payload, default=str)
+            session_id = self._get_world_session_id() or ""
+            for _ in invoke_hook(
+                "transform_tool_result",
+                tool_name="mc_action_result",
+                args={},
+                result=result_str,
+                task_id="",
+                session_id=session_id,
+                tool_call_id="",
+                duration_ms=0,
+            ):
+                pass
+        except Exception as _hook_exc:
+            logger.debug("[DaemonCraft] mc_action_result hook error: %s", _hook_exc)
 
     async def _handle_heartbeat_context(self, data: dict) -> None:
         """Process heartbeat_context with two-level event architecture.
@@ -571,6 +599,7 @@ class DaemonCraftAdapter(BasePlatformAdapter):
         current_health = status.get("health")
         if current_health is not None and hasattr(self, "_last_health"):
             if current_health < self._last_health:
+                logger.info("[DaemonCraft] Wake-up reason: health dropped %s -> %s", self._last_health, current_health)
                 self._last_health = current_health
                 return "wake_up"
         if current_health is not None:
@@ -580,6 +609,7 @@ class DaemonCraftAdapter(BasePlatformAdapter):
         for ev in events:
             ev_str = str(ev).lower()
             if any(k in ev_str for k in ("damage", "hurt", "attack", "hit", "died", "killed")):
+                logger.info("[DaemonCraft] Wake-up reason: damage event '%s'", ev_str[:80])
                 return "wake_up"
 
         # Hostile mobs in pre-filtered visible_entities (PerceptionSnapshot)
@@ -587,13 +617,21 @@ class DaemonCraftAdapter(BasePlatformAdapter):
         for ent in (data.get("visible_entities") or [])[:12]:
             name = str(ent.get("type", ent) if isinstance(ent, dict) else ent).lower()
             if any(h in name for h in hostile):
+                logger.info("[DaemonCraft] Wake-up reason: hostile entity '%s'", name)
                 return "wake_up"
 
         # Hazards in the snapshot (e.g. lava, fire)
         for haz in (data.get("hazards") or [])[:5]:
             haz_str = str(haz).lower()
             if any(k in haz_str for k in ("lava", "fire", "cactus", "sweet_berry_bush", "magma")):
+                logger.info("[DaemonCraft] Wake-up reason: hazard '%s'", haz_str[:80])
                 return "wake_up"
+
+        # Bot stuck — critical, needs immediate reaction
+        task = status.get("task")
+        if task and task.get("status") == "stuck":
+            logger.info("[DaemonCraft] Wake-up reason: bot stuck (%s)", task.get("error", "unknown")[:60])
+            return "wake_up"
 
         return "context"
 
@@ -689,6 +727,28 @@ class DaemonCraftAdapter(BasePlatformAdapter):
         }
 
         self._session_store.append_to_transcript(session_id, assistant_msg)
+
+        # Run transform_tool_result hooks so plugins (e.g. altercraft scene-graph)
+        # can consume synthetic mc_perceive on the same path as real tool results.
+        try:
+            from hermes_cli.plugins import invoke_hook
+            for hook_result in invoke_hook(
+                "transform_tool_result",
+                tool_name="mc_perceive",
+                args={},
+                result=payload,
+                task_id="",
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+                duration_ms=0,
+            ):
+                if isinstance(hook_result, str):
+                    payload = hook_result
+                    tool_msg["content"] = payload
+                    break
+        except Exception as _hook_exc:
+            logger.debug("[DaemonCraft] transform_tool_result hook error: %s", _hook_exc)
+
         self._session_store.append_to_transcript(session_id, tool_msg)
         logger.info("[DaemonCraft] Synthetic mc_perceive injected into session %s", session_id)
 
@@ -802,9 +862,19 @@ class DaemonCraftAdapter(BasePlatformAdapter):
         target = "broadcast" if is_group else chat_id
 
         result = await self._body.chat(self._session, content)
-        if result.get("ok"):
-            return SendResult(success=True)
-        return SendResult(success=False, error=result.get("error", "unknown"), retryable=True)
+        if not result.get("ok"):
+            return SendResult(success=False, error=result.get("error", "unknown"), retryable=True)
+
+        # DC-123: relay TTS to dashboard after successful outbound message.
+        # Skip PASS/empty heartbeat responses, metadata-flagged suppression, and system messages.
+        system_tts_skip = {"steer", "gateway shutting down", "synthetic mc_perceive", "heartbeat", "mc_perceive"}
+        is_system_msg = any(skip in content.lower() for skip in system_tts_skip)
+        if (content and content.strip() not in ("PASS", "")
+                and not is_system_msg
+                and not (metadata or {}).get("suppress_tts")):
+            asyncio.create_task(self._generate_and_relay_tts(content, chat_id))
+
+        return SendResult(success=True)
 
     async def _post_agent_log(self, content: str, metadata: Optional[Dict[str, Any]] = None) -> None:
         """Post agent turn to bot server /agent/log for dashboard display."""
@@ -826,6 +896,88 @@ class DaemonCraftAdapter(BasePlatformAdapter):
             await self._body.log_turn(self._session, payload)
         except Exception as e:
             logger.debug("[DaemonCraft] /agent/log exception: %s", e)
+
+    async def _generate_and_relay_tts(self, text: str, chat_id: str) -> None:
+        """Generate TTS for outbound text and relay audio to the dashboard.
+
+        DC-123: gateway owns cognition since DC-112; the agent_loop no longer
+        emits TTS. Called as a fire-and-forget task from send().
+        """
+        try:
+            from tools.tts_tool import text_to_speech_tool, check_tts_requirements
+            if not check_tts_requirements():
+                return
+            import re as _re
+            clean = _re.sub(r'§[0-9a-fklmnor]', '', text)
+            clean = _re.sub(r'[*_`#\[\]()]', '', clean).strip()
+            if not clean:
+                return
+            # Edge-TTS stutter fix: prepend zero-width space to prevent first-word repetition.
+            clean = "​" + clean
+            tts_result = await asyncio.to_thread(text_to_speech_tool, text=clean[:4000])
+            tts_data = json.loads(tts_result)
+            audio_path = tts_data.get("file_path")
+            if audio_path and os.path.exists(audio_path):
+                await self._copy_and_relay_tts(audio_path, chat_id)
+                try:
+                    os.remove(audio_path)
+                except OSError:
+                    pass
+        except Exception as e:
+            logger.debug("[DaemonCraft] TTS generation failed: %s", e)
+
+    def _emit_metric(self, kind: str, **fields) -> None:
+        """Append a JSON line to ~/.hermes/metrics/<cast>/<date>.jsonl (DC-132).
+
+        Mirrors the heartbeat emitter in daemoncraft's agents/agent_loop.py.
+        Together they cover the families that scripts/agent-metrics-report.py
+        aggregates: turns, tool calls, heartbeats, failures.
+
+        POSIX guarantees writes shorter than PIPE_BUF (typically 4 KB on Linux)
+        are atomic with O_APPEND — prevents half-written JSONL lines under
+        concurrent writers or process kill mid-write.
+        """
+        try:
+            cast = os.getenv("DAEMONCRAFT_METRICS_CAST", "").strip() or self._bot_username or "daemoncraft"
+            metrics_root = Path(os.getenv("DAEMONCRAFT_METRICS_DIR", str(Path.home() / ".hermes" / "metrics")))
+            now = _dt.datetime.utcnow()
+            cast_dir = metrics_root / cast
+            cast_dir.mkdir(parents=True, exist_ok=True)
+            path = cast_dir / f"{now.date().isoformat()}.jsonl"
+            record = {
+                "ts": now.isoformat(timespec="seconds") + "Z",
+                "cast": cast,
+                "agent": self._bot_username or "?",
+                "kind": kind,
+                **fields,
+            }
+            line = (json.dumps(record, separators=(",", ":")) + "\n").encode("utf-8")
+            fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+            try:
+                os.write(fd, line)
+            finally:
+                os.close(fd)
+        except Exception:
+            pass
+
+    async def on_processing_complete(self, event, outcome) -> None:
+        """DC-132: emit per-turn metric after the gateway finishes processing.
+
+        Dashboard /agent/log posting happens in send() via _post_agent_log,
+        so this hook only emits the metric. tokens_in/out aren't exposed at
+        this hook so we emit zero placeholders rather than fabricate values.
+        """
+        try:
+            tool_calls = []
+            self._emit_metric(
+                "turn",
+                tokens_in=0,
+                tokens_out=0,
+                latency_ms=None,
+                tool_call_count=len(tool_calls),
+            )
+        except Exception:
+            pass
 
     async def _copy_and_relay_tts(self, audio_path: str, chat_id: str) -> SendResult:
         """Copy audio to shared TTS cache and POST /tts/play to dashboards."""
