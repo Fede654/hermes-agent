@@ -29,7 +29,10 @@ import re
 import time as _time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent.research.sinks import ProgressSink
 
 from hermes_constants import get_hermes_home
 
@@ -429,32 +432,6 @@ def _call_delegate_task_batch(
 
 
 # ---------------------------------------------------------------------------
-# Lattice comment bridge
-# ---------------------------------------------------------------------------
-
-def _make_lattice_comment_fn(
-    lattice_task_id: Optional[str],
-    lattice_root: str,
-) -> Callable[[str], None]:
-    if not lattice_task_id:
-        return lambda msg: logger.info("[lattice-stub] %s", msg)
-
-    def _comment(msg: str) -> None:
-        try:
-            import subprocess
-            subprocess.run(
-                ["lattice", "comment", lattice_task_id, msg, "--actor", "agent:research-supervisor"],
-                cwd=lattice_root,
-                capture_output=True,
-                timeout=10,
-            )
-        except Exception as exc:
-            logger.warning("Lattice comment failed: %s", exc)
-
-    return _comment
-
-
-# ---------------------------------------------------------------------------
 # Durable checkpoint + snapshot helpers (HRM-93, HRM-96)
 # ---------------------------------------------------------------------------
 
@@ -632,8 +609,9 @@ class ResearchSupervisor:
     Args:
         parent_agent: Live AIAgent instance (required for delegate_task).
         workspace: Root directory for round artefacts.
-        lattice_task_id: Lattice task to post round comments to (optional).
-        lattice_root: Directory containing .lattice/.
+        progress_sink: Optional ProgressSink to receive run lifecycle events
+            (run_started / iteration_observed / run_completed) and free-form
+            comments. Defaults to a log-only StubSink when omitted.
     """
 
     def __init__(
@@ -641,13 +619,15 @@ class ResearchSupervisor:
         *,
         parent_agent: Any,
         workspace: Path | None = None,
-        lattice_task_id: Optional[str] = None,
-        lattice_root: str = str(get_hermes_home() / "org"),
+        progress_sink: Optional["ProgressSink"] = None,
     ) -> None:
         self._parent_agent = parent_agent
         self._workspace = workspace or (get_hermes_home() / "research-workspace")
-        self._lattice_task_id = lattice_task_id
-        self._lattice_root = lattice_root
+        if progress_sink is None:
+            from agent.research.sinks import StubSink
+            self._sink = StubSink()
+        else:
+            self._sink = progress_sink
         # Populated by run() — past-run lessons prepended to every worker brief.
         self._evolution_overlay: str = ""
 
@@ -693,9 +673,11 @@ class ResearchSupervisor:
             keep_threshold=keep_threshold,
         )
 
-        lattice_comment_fn = _make_lattice_comment_fn(
-            self._lattice_task_id, self._lattice_root
-        )
+        # All progress events flow through the sink. The local
+        # `comment_fn` name is the free-form-text channel used by the
+        # baseline-only branch, _reflect, and partial-success messages.
+        comment_fn = self._sink.comment
+        self._sink.run_started(spec, run_id)
 
         # Load past-run lessons once per run; cap size to avoid token blow-up.
         # Failure must not break the loop — overlay is best-effort. The helper
@@ -732,14 +714,12 @@ class ResearchSupervisor:
             config=config,
             workspace=self._workspace / run_id,
             delegate_fn=delegate_fn,
-            lattice_comment_fn=lattice_comment_fn,
+            progress_sink=self._sink,
         )
 
         run_dir = self._workspace / run_id
-        lattice_comment_fn(
-            f"Loop started: run_id={run_id} type={spec.task_type} "
-            f"metric={spec.metric_key} topic={spec.topic[:50]}"
-        )
+        # The sink's run_started hook (already called above) handles the
+        # "loop started" announcement. No duplicate comment here.
 
         # --- HRM-93: durable resume ---
         # If checkpoint.json + history.json exist on disk, replay-skip every
@@ -768,7 +748,7 @@ class ResearchSupervisor:
                     or last.code
                     or initial_attempt
                 )
-            lattice_comment_fn(
+            comment_fn(
                 f"Resuming from checkpoint: round={last_round} "
                 f"best={resumed_history.best_result.primary_metric if resumed_history.best_result else None}"
             )
@@ -781,6 +761,7 @@ class ResearchSupervisor:
             best_artifact_holder = [baseline_artifact]
             # --- OBSERVE --- (no previous best for the baseline iteration)
             self._observe(baseline, spec, run_dir, previous_best=None)
+            self._sink.iteration_observed(0, baseline, run_dir)
             self._checkpoint(runner.history, checkpoint_dir, round=0)
             self._snapshot(runner.history, checkpoint_dir, run_dir, iteration=0, result=baseline)
             if checkpoint_dir:
@@ -789,7 +770,8 @@ class ResearchSupervisor:
                 emit_event(checkpoint_dir, ResearchEvent.BASELINE_COMPLETED, {"metric": getattr(baseline, "primary_metric", None)})
 
         if llm is None:
-            lattice_comment_fn(f"Baseline only. best={runner.history.baseline_metric}")
+            comment_fn(f"Baseline only. best={runner.history.baseline_metric}")
+            self._sink.run_completed(runner.history)
             try:
                 self._evolve(runner.history, spec, run_id)
             except Exception as exc:
@@ -828,7 +810,7 @@ class ResearchSupervisor:
             )
             if fan_out > 1:
                 # HYPOTHESIS FAN-OUT (HRM-108): generate N variants and run in parallel
-                lattice_comment_fn(
+                comment_fn(
                     f"Fan-out iteration {iteration}: generating {fan_out} hypotheses"
                 )
                 attempts = self._fan_out_attempts(
@@ -859,7 +841,7 @@ class ResearchSupervisor:
                     # a super-attempt that combines the best ideas from each branch.
                     # The aggregated attempt becomes the seed for the next iteration,
                     # while the best branch's metric determines if this round improved.
-                    lattice_comment_fn(
+                    comment_fn(
                         f"MOA aggregation: synthesizing {len(results)} branches"
                     )
                     aggregated_attempt = self._aggregate_attempts(
@@ -868,11 +850,12 @@ class ResearchSupervisor:
                     actual_artifact = aggregated_attempt
                 else:
                     # Fan-out without aggregation: use best branch directly
-                    lattice_comment_fn(
+                    comment_fn(
                         f"Fan-out best branch: using branch 1/{len(results)} (no MOA)"
                     )
                     actual_artifact = self._read_artifact(spec, run_dir, best_result) or best_result.code or attempt_holder[0]
                 self._observe(best_result, spec, run_dir, previous_best=_prev_best)
+                self._sink.iteration_observed(iteration, best_result, run_dir)
                 self._checkpoint(runner.history, checkpoint_dir, round=iteration)
                 self._snapshot(
                     runner.history, checkpoint_dir, run_dir,
@@ -895,6 +878,7 @@ class ResearchSupervisor:
 
                 # OBSERVE + REMEMBER — extract and persist structured learning
                 self._observe(result, spec, run_dir, previous_best=_prev_best)
+                self._sink.iteration_observed(iteration, result, run_dir)
                 self._checkpoint(runner.history, checkpoint_dir, round=iteration)
                 self._snapshot(runner.history, checkpoint_dir, run_dir, iteration=iteration, result=result)
                 if checkpoint_dir:
@@ -937,7 +921,7 @@ class ResearchSupervisor:
                         run_id, spec.acceptance_criterion,
                         spec.metric_key, result.primary_metric,
                     )
-                    lattice_comment_fn(
+                    comment_fn(
                         f"Acceptance criterion met: '{spec.acceptance_criterion}' "
                         f"({spec.metric_key}={result.primary_metric})"
                     )
@@ -949,7 +933,7 @@ class ResearchSupervisor:
                     no_improvement, run_id, early_stop_limit,
                 )
                 # SEPL: reflection optimizer — synthesize before giving up
-                self._reflect(runner.history, spec, llm, lattice_comment_fn, run_dir)
+                self._reflect(runner.history, spec, llm, comment_fn, run_dir)
                 break
 
         best = runner.history.best_result
@@ -957,15 +941,12 @@ class ResearchSupervisor:
         # report as partial success instead of total failure
         last_result = runner.history.results[-1] if runner.history.results else None
         if last_result and last_result.primary_metric is None and best:
-            lattice_comment_fn(
+            comment_fn(
                 f"Loop done (PARTIAL): {len(runner.history.results)} rounds, "
                 f"best={best.primary_metric}. Last iteration failed but prior best preserved."
             )
-        else:
-            lattice_comment_fn(
-                f"Loop done: {len(runner.history.results)} rounds, "
-                f"best={best.primary_metric if best else None}"
-            )
+
+        self._sink.run_completed(runner.history)
 
         # Persist lessons for cross-run learning. Append-only — failure here
         # must not affect the loop's return value.
@@ -1491,7 +1472,7 @@ class ResearchSupervisor:
         history: "ExperimentHistory",
         spec: TaskSpec,
         llm: Any,
-        lattice_comment_fn: "Callable[[str], None]",
+        comment_fn: "Callable[[str], None]",
         run_dir: Path,
     ) -> None:
         """Synthesis pass after 3 non-improving iterations.
@@ -1513,7 +1494,7 @@ class ResearchSupervisor:
         best_metric = best.primary_metric if best else None
 
         if not llm:
-            lattice_comment_fn(
+            comment_fn(
                 f"[reflect] Early stop after 3 non-improving rounds. "
                 f"Best {spec.metric_key}={best_metric}. "
                 f"llm=None — reflection skipped. Pass an LLM client to enable diagnosis."
@@ -1521,7 +1502,7 @@ class ResearchSupervisor:
             return
 
         if not learnings:
-            lattice_comment_fn(
+            comment_fn(
                 f"[reflect] Early stop after 3 non-improving rounds. "
                 f"Best {spec.metric_key}={best_metric}. "
                 f"No learnings in learnings.jsonl — re-examine hypothesis manually."
@@ -1561,7 +1542,7 @@ class ResearchSupervisor:
             logger.warning("Reflection LLM call failed: %s", exc)
             diagnosis = f"LLM reflection failed: {exc}"
 
-        lattice_comment_fn(
+        comment_fn(
             f"[reflect] Early stop after {len(learnings)} rounds. "
             f"Best {spec.metric_key}={best_metric}.\n\n"
             f"Diagnosis:\n{diagnosis}"

@@ -135,7 +135,10 @@ class ExperimentRunner:
         workspace: Directory for round artefacts.
         delegate_fn: Callable(goal: str, working_dir: str) -> DelegateSandboxResult.
             Wraps delegate_task; caller is responsible for spawning the worker.
-        lattice_comment_fn: Optional callable(msg: str) -> None for posting round summaries.
+        progress_sink: Optional ProgressSink. The runner only uses
+            ``progress_sink.comment(msg)`` for the round summary posts that
+            previously went through ``lattice_comment_fn``. Defaults to a
+            log-only StubSink when omitted.
     """
 
     def __init__(
@@ -144,13 +147,21 @@ class ExperimentRunner:
         workspace: Path,
         *,
         delegate_fn: Callable[[str, str], "DelegateSandboxResult"],
-        lattice_comment_fn: Optional[Callable[[str], None]] = None,
+        progress_sink: Optional[Any] = None,
     ) -> None:
         self.config: HermesExperimentConfig = config
         self.workspace: Path = workspace
         self.workspace.mkdir(parents=True, exist_ok=True)
         self._delegate_fn = delegate_fn
-        self._lattice_comment = lattice_comment_fn or (lambda msg: None)
+        if progress_sink is None:
+            from agent.research.sinks import StubSink
+            self._sink = StubSink()
+        else:
+            self._sink = progress_sink
+        # Backward-compat alias: existing internal call sites use
+        # self._lattice_comment. Point it at the sink's comment method so
+        # nothing inside the class needs to change.
+        self._lattice_comment = self._sink.comment
         self.history: ExperimentHistory = ExperimentHistory()
 
     def run_experiment(

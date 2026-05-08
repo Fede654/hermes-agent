@@ -294,14 +294,14 @@ class TestResearchSupervisorBaseline:
         assert result.kept is False
         assert result.primary_metric is None
 
-    def test_lattice_comment_fn_called(self, tmp_workspace: Path, mock_parent_agent: MagicMock, code_spec: TaskSpec):
-        """Lattice comment function is called at loop start and end."""
+    def test_progress_sink_default_is_log_only(self, tmp_workspace: Path, mock_parent_agent: MagicMock, code_spec: TaskSpec):
+        """When no progress_sink is passed, the default StubSink is used and
+        the loop runs to completion without raising."""
         with patch("tools.delegate_tool.delegate_task", return_value=_make_delegate_result(0.9)):
             supervisor = ResearchSupervisor(
                 parent_agent=mock_parent_agent,
                 workspace=tmp_workspace,
             )
-            supervisor._lattice_task_id = None  # stub mode — logs only
             history = supervisor.run(
                 code_spec,
                 initial_attempt="pass",
@@ -645,3 +645,46 @@ class TestEvolutionOverlay:
                 # If propagation happens, mark as failure explicitly.
                 pytest.fail("_load_evolution_overlay failure must be swallowed")
             assert history is not None
+
+
+# ---------------------------------------------------------------------------
+# ProgressSink wiring (Task 3 in the prune plan)
+# ---------------------------------------------------------------------------
+
+class TestSupervisorCallsProgressSink:
+    @pytest.mark.integration
+    def test_sink_receives_run_started_iteration_run_completed(self, tmp_path):
+        """Even on the baseline-only path (llm is None), the sink must see
+        run_started, exactly one iteration_observed (iter=0), and run_completed.
+        Audit fix #4: the early-return path was missing run_completed."""
+        from agent.research.sinks import StubSink
+
+        sink = StubSink()
+        sink.run_started = MagicMock(side_effect=sink.run_started)
+        sink.iteration_observed = MagicMock(side_effect=sink.iteration_observed)
+        sink.run_completed = MagicMock(side_effect=sink.run_completed)
+
+        spec = TaskSpec(
+            topic="t", deliverable="d",
+            metric_key="m", metric_direction="maximize",
+        )
+
+        def fake_delegate(*a, **kw):
+            return {"results": [{"status": "completed", "summary": "METRIC: m=0.5"}]}
+
+        with patch("agent.research.supervisor._call_delegate_task", side_effect=fake_delegate):
+            sup = ResearchSupervisor(
+                parent_agent=MagicMock(),
+                workspace=tmp_path,
+                progress_sink=sink,
+            )
+            sup.run(
+                spec, initial_attempt="x", run_id="rid",
+                max_iterations=0,  # baseline only
+                llm=None,
+                disable_evolution_overlay=True,
+            )
+
+        sink.run_started.assert_called_once()
+        assert sink.iteration_observed.call_count == 1
+        sink.run_completed.assert_called_once()

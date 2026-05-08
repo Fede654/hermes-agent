@@ -87,7 +87,7 @@ class TestObserveClassification:
             metric_key="pass_rate", metric_direction="maximize",
         )
         self.sup = ResearchSupervisor(
-            parent_agent=MagicMock(), workspace=self.tmp, lattice_task_id=None,
+            parent_agent=MagicMock(), workspace=self.tmp,
         )
 
     def _last_type(self):
@@ -143,7 +143,7 @@ class TestDisableEvolutionOverlay:
             metric_key="m", metric_direction="maximize",
         )
         sup = ResearchSupervisor(
-            parent_agent=MagicMock(), workspace=tmp, lattice_task_id=None,
+            parent_agent=MagicMock(), workspace=tmp,
         )
         # Sentinel: if this gets called when disabled, the test fails.
         with patch.object(sup, "_load_evolution_overlay") as mock_loader:
@@ -164,7 +164,7 @@ class TestDisableEvolutionOverlay:
             metric_key="m", metric_direction="maximize",
         )
         sup = ResearchSupervisor(
-            parent_agent=MagicMock(), workspace=tmp, lattice_task_id=None,
+            parent_agent=MagicMock(), workspace=tmp,
         )
         with patch.object(sup, "_load_evolution_overlay", return_value="") as mock_loader:
             with patch("agent.research.supervisor._call_delegate_task") as mock_dt:
@@ -205,7 +205,7 @@ class TestAcceptanceTerminationE2E:
             acceptance_criterion="pass_rate >= 0.9",
         )
         sup = ResearchSupervisor(
-            parent_agent=MagicMock(), workspace=tmp, lattice_task_id=None,
+            parent_agent=MagicMock(), workspace=tmp,
         )
         stub_llm = MagicMock()
         stub_llm.chat.return_value = MagicMock(content="```python\nx\n```")
@@ -240,7 +240,7 @@ class TestAcceptanceTerminationE2E:
             acceptance_criterion="pass_rate >= 0.9",
         )
         sup = ResearchSupervisor(
-            parent_agent=MagicMock(), workspace=tmp, lattice_task_id=None,
+            parent_agent=MagicMock(), workspace=tmp,
         )
         stub_llm = MagicMock()
         stub_llm.chat.return_value = MagicMock(content="```python\nx\n```")
