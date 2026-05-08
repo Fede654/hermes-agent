@@ -78,3 +78,4 @@ models-dev-upstream/
 # Local project memory and session artifacts (never commit)
 .codex
 hermes_conversation_*.json
+research-cases/
