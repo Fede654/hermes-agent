@@ -231,7 +231,7 @@ def _child_main(spec_path: str) -> int:
                 initial_attempt=spec.get("initial_attempt", ""),
                 max_iterations=spec.get("max_iterations", 3),
                 time_budget_sec=spec.get("time_budget_sec", 0),
-                lattice_task_id=spec.get("lattice_task_id"),
+                kanban_task_id=spec.get("kanban_task_id"),
                 parent_agent=agent,
                 checkpoint_dir=str(job_dir),
                 timeout_sec=spec.get("timeout_sec", 0),

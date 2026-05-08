@@ -49,12 +49,6 @@ def _load_config_for_job() -> dict[str, Any]:
     }
 
 
-def _lattice_available() -> bool:
-    """Check whether Lattice is initialized so research jobs can post comments."""
-    lattice_dir = get_hermes_home() / "org" / ".lattice"
-    return lattice_dir.exists() and (lattice_dir / "ids.json").exists()
-
-
 # ---------------------------------------------------------------------------
 # Tool schema
 # ---------------------------------------------------------------------------
@@ -126,9 +120,13 @@ RESEARCH_JOB_SCHEMA = {
                 "type": "integer",
                 "description": "Time budget per worker invocation in seconds. Default: 0 (unlimited).",
             },
-            "lattice_task_id": {
+            "kanban_task_id": {
                 "type": "string",
-                "description": "Optional Lattice task ID for round-by-round progress comments.",
+                "description": (
+                    "Optional kanban task id (existing task) for round-by-round "
+                    "progress comments. Caller must create the task; the job "
+                    "does not auto-create."
+                ),
             },
             "initial_attempt": {
                 "type": "string",
@@ -155,13 +153,6 @@ RESEARCH_JOB_SCHEMA = {
 def _action_start(args: dict[str, Any]) -> str:
     job_id = args.get("job_id") or secrets.token_hex(8)
     cfg = _load_config_for_job()
-    lattice_task_id = args.get("lattice_task_id")
-    if lattice_task_id and not _lattice_available():
-        logger.warning(
-            "Lattice task ID %s requested but ~/.hermes/org/.lattice/ is not initialized. "
-            "Progress comments will be skipped. Run 'cd ~/.hermes/org && lattice init' to enable.",
-            lattice_task_id,
-        )
 
     spec = {
         "job_id": job_id,
@@ -174,7 +165,7 @@ def _action_start(args: dict[str, Any]) -> str:
         "evaluation_prompt": args.get("evaluation_prompt", ""),
         "max_iterations": args.get("max_iterations", 3),
         "time_budget_sec": args.get("time_budget_sec", 0),
-        "lattice_task_id": args.get("lattice_task_id"),
+        "kanban_task_id": args.get("kanban_task_id"),
         "initial_attempt": args.get("initial_attempt", ""),
         "acceptance_criterion": args.get("acceptance_criterion", ""),
         "timeout_sec": args.get("timeout_sec", 0),
@@ -372,7 +363,7 @@ def research_job(
     evaluation_prompt: str = "",
     max_iterations: int = 3,
     time_budget_sec: int = 0,
-    lattice_task_id: str = "",
+    kanban_task_id: str = "",
     initial_attempt: str = "",
     acceptance_criterion: str = "",
     timeout_sec: int = 0,
