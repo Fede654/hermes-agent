@@ -2229,6 +2229,7 @@ def resolve_provider_client(
     result = _resolve_provider_client_impl(
         provider, model, async_mode, raw_codex,
         explicit_base_url, explicit_api_key, api_mode, main_runtime,
+        is_vision=is_vision,
     )
     with _resolve_provider_cache_lock:
         _resolve_provider_cache[cache_key] = result
@@ -2244,6 +2245,7 @@ def _resolve_provider_client_impl(
     explicit_api_key: str = None,
     api_mode: str = None,
     main_runtime: Optional[Dict[str, Any]] = None,
+    is_vision: bool = False,
 ) -> Tuple[Optional[Any], Optional[str]]:
     """Central router: given a provider name and optional model, return a
     configured client with the correct auth, base URL, and API format.
