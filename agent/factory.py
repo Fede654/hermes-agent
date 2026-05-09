@@ -49,21 +49,26 @@ def build_agent_for_research_job(spec: dict[str, Any]) -> Any:
         session_id=f"research-job:{spec['job_id']}",
         skip_context_files=spec.get("skip_context_files", False),
         skip_memory=spec.get("skip_memory", False),
-        # HRM-57 full: the five formerly-patched runtime invariants are now
-        # constructor kwargs on AIAgent. terminal_cwd / cwd default to
-        # env-derived values inside __init__; the rest are zero/None defaults
-        # appropriate for a top-level detached parent.
-        delegate_depth=0,
-        terminal_cwd=os.getcwd(),
-        cwd=os.getcwd(),
-        subdirectory_hints=None,
     )
 
-    # Only the progress callback still needs post-init wiring because it is
-    # not a constructor kwarg today. tool_progress_callback IS in __init__,
-    # but defaults to None — set a no-op so callers that read it can dispatch
-    # without checking. provider_* are honored by __init__ from the spec, so
-    # the previous defensive getattr block is no longer necessary.
+    # The "HRM-57 full" idea was to fold these five runtime invariants into
+    # AIAgent.__init__ upstream so the factory wouldn't need to patch them.
+    # That kwargs change never landed in the upstream AIAgent — the
+    # constructor still hardcodes _delegate_depth=0 internally and does not
+    # accept delegate_depth / terminal_cwd / cwd / subdirectory_hints kwargs
+    # at all. Until that reaches main, we patch the post-init invariants the
+    # delegate_task code path depends on.
+    if not hasattr(agent, "_delegate_depth"):
+        agent._delegate_depth = 0
+    if not hasattr(agent, "terminal_cwd") or not getattr(agent, "terminal_cwd", None):
+        agent.terminal_cwd = os.getcwd()
+    if not hasattr(agent, "cwd") or not getattr(agent, "cwd", None):
+        agent.cwd = os.getcwd()
+    if not hasattr(agent, "_subdirectory_hints"):
+        agent._subdirectory_hints = None
+
+    # tool_progress_callback IS in __init__, but defaults to None. Set a
+    # no-op so callers that read it can dispatch without a None-check.
     if agent.tool_progress_callback is None:
         agent.tool_progress_callback = lambda *a, **k: None
 

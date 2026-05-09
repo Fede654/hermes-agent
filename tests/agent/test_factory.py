@@ -47,18 +47,28 @@ class TestBuildAgentForResearchJob:
         assert captured["skip_context_files"] is True
         assert captured["skip_memory"] is True
 
-    def test_runtime_invariants_passed_as_kwargs(self):
-        """After HRM-57 full, the runtime invariants are constructor kwargs.
-        The factory must hand them to AIAgent rather than patch post-init."""
-        captured: dict = {}
+    def test_runtime_invariants_patched_post_init(self):
+        """The HRM-57-full kwargs (delegate_depth / terminal_cwd / cwd /
+        subdirectory_hints) never landed in upstream AIAgent.__init__, so
+        the factory patches them post-construction. This test pins that
+        contract so it doesn't silently regress to the pre-fix behavior
+        where AIAgent would crash on unexpected kwargs."""
         with patch("run_agent.AIAgent") as MockAgent:
-            MockAgent.side_effect = lambda *a, **kw: captured.update(kw) or MagicMock(tool_progress_callback=None)
-            build_agent_for_research_job(_SPEC)
+            # Real AIAgent doesn't accept these kwargs — simulate that.
+            mock_agent = MagicMock(
+                spec=[
+                    "tool_progress_callback",
+                ],
+            )
+            mock_agent.tool_progress_callback = None
+            MockAgent.return_value = mock_agent
+            agent = build_agent_for_research_job(_SPEC)
 
-        assert captured["delegate_depth"] == 0
-        assert "terminal_cwd" in captured
-        assert "cwd" in captured
-        assert captured["subdirectory_hints"] is None
+        # Patched-on attributes the delegate_task code path reads.
+        assert agent._delegate_depth == 0
+        assert agent.terminal_cwd  # non-empty string
+        assert agent.cwd
+        assert agent._subdirectory_hints is None
 
     def test_progress_callback_is_no_op_when_none(self):
         """The factory still sets a no-op tool_progress_callback when AIAgent
