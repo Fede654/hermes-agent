@@ -164,8 +164,20 @@ RESEARCH_TOOL_SCHEMA = {
                 ),
                 "default": False,
             },
+            "auto_specify": {
+                "type": "boolean",
+                "description": (
+                    "When true and deliverable/metric_key are missing, call "
+                    "the kanban triage_specifier auxiliary LLM to flesh out "
+                    "the TaskSpec from the topic alone. Empty fields only — "
+                    "explicit caller values are never overridden. Falls back "
+                    "to the original args when the aux LLM is unavailable. "
+                    "Default: false."
+                ),
+                "default": False,
+            },
         },
-        "required": ["topic", "deliverable", "metric_key"],
+        "required": ["topic"],
     },
 }
 
@@ -201,12 +213,12 @@ class _LLMBridge:
 
 def run_research(
     topic: str,
-    deliverable: str,
-    metric_key: str,
-    metric_direction: str = "maximize",
-    task_type: str = "generic",
+    deliverable: str = "",
+    metric_key: str = "",
+    metric_direction: Optional[str] = None,
+    task_type: Optional[str] = None,
     acceptance_criterion: str = "",
-    evaluation_mode: str = "self_report",
+    evaluation_mode: Optional[str] = None,
     evaluation_prompt: str = "",
     initial_attempt: str = "",
     max_iterations: int = 3,
@@ -218,11 +230,47 @@ def run_research(
     strategies: Optional[list[dict[str, Any]]] = None,
     repeats: int = 1,
     disable_evolution_overlay: bool = False,
+    auto_specify: bool = False,
 ) -> str:
     if parent_agent is None:
         return json.dumps({"error": "run_research requires a parent_agent context."})
 
     from hermes_constants import get_hermes_home
+
+    # Phase C — auto-specify a vague topic when caller left the
+    # scaffolding fields empty/None. Only fills empty fields; never
+    # overrides explicit caller values. Falls back to the original args
+    # when the aux LLM is unavailable or returns unparseable output.
+    if auto_specify and (not deliverable or not metric_key):
+        from agent.research.auto_specify import auto_specify_topic
+        scaffold = auto_specify_topic(topic)
+        if scaffold:
+            if not deliverable:
+                deliverable = str(scaffold.get("deliverable") or "")
+            if not metric_key:
+                metric_key = str(scaffold.get("metric_key") or "")
+            if metric_direction is None:
+                metric_direction = scaffold.get("metric_direction") or None
+            if task_type is None:
+                task_type = scaffold.get("task_type") or None
+            if evaluation_mode is None:
+                evaluation_mode = scaffold.get("evaluation_mode") or None
+            if not evaluation_prompt:
+                evaluation_prompt = str(scaffold.get("evaluation_prompt") or "")
+        else:
+            logger.warning(
+                "auto_specify: topic %r could not be fleshed out; running with "
+                "the original (possibly empty) args.", topic,
+            )
+
+    # Normalize defaults AFTER auto_specify so we don't conflate an
+    # auto-filled value with a caller-supplied one above.
+    if metric_direction is None:
+        metric_direction = "maximize"
+    if task_type is None:
+        task_type = "generic"
+    if evaluation_mode is None:
+        evaluation_mode = "self_report"
 
     spec = TaskSpec(
         topic=topic,
@@ -426,6 +474,8 @@ registry.register(
         checkpoint_dir=args.get("checkpoint_dir"),
         strategies=args.get("strategies"),
         repeats=args.get("repeats", 1),
+        disable_evolution_overlay=args.get("disable_evolution_overlay", False),
+        auto_specify=args.get("auto_specify", False),
     ),
     check_fn=_check_research_requirements,
     emoji="🔬",
