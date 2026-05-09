@@ -4627,14 +4627,27 @@ def _(rid, params: dict) -> dict:
                 },
             )
 
-        # Otherwise — treat the remaining text as the new goal.
+        # Otherwise — treat the remaining text as the new goal. Parse an
+        # optional trailing metric criterion ("..., pass_rate >= 0.9") so
+        # the judge can short-circuit deterministically when the agent
+        # emits a METRIC: line.
+        from hermes_cli.goals import _split_goal_text_and_criterion
+        text, metric_key, criterion = _split_goal_text_and_criterion(arg)
         try:
-            state = mgr.set(arg)
+            state = mgr.set(
+                text,
+                metric_key=metric_key,
+                acceptance_criterion=criterion,
+            )
         except ValueError as exc:
             return _err(rid, 4004, f"invalid goal: {exc}")
 
+        criterion_line = (
+            f"\nMetric criterion: {state.acceptance_criterion}"
+            if state.acceptance_criterion else ""
+        )
         notice = (
-            f"⊙ Goal set ({state.max_turns}-turn budget): {state.goal}\n"
+            f"⊙ Goal set ({state.max_turns}-turn budget): {state.goal}{criterion_line}\n"
             "I'll keep working until the goal is done, you pause/clear it, or the budget is exhausted.\n"
             "Controls: /goal status · /goal pause · /goal resume · /goal clear"
         )
