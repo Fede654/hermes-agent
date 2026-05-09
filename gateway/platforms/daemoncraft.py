@@ -162,15 +162,16 @@ class DaemonCraftAdapter(BasePlatformAdapter):
     async def handle_message(self, event: MessageEvent) -> None:
         """Handle a chat message, injecting heartbeat context if relevant.
 
-        Sets the bot_api_url context variable so that any minecraft tools
-        dispatched for this message target the correct bot server.
+        Sets the bot_api_url context variable so that any tools (today:
+        embodied_plan; previously: minecraft/altercraft) dispatched for
+        this message target the correct bot server.
         """
-        from tools import minecraft_tools
-        token = minecraft_tools._bot_api_url_ctx.set(self._bot_api_url)
+        from tools.bot_api_url_ctx import set_bot_api_url, reset_bot_api_url
+        token = set_bot_api_url(self._bot_api_url)
         try:
             await super().handle_message(event)
         finally:
-            minecraft_tools._bot_api_url_ctx.reset(token)
+            reset_bot_api_url(token)
 
     # ------------------------------------------------------------------
     # WebSocket listener

@@ -237,17 +237,6 @@ TOOLSETS = {
         "includes": [],
     },
 
-    "minecraft": {
-        "description": "Minecraft embodied agent tools — perceive, navigate, build, craft, combat, manage, screenshot, command, story, registry",
-        "tools": [
-            "mc_perceive", "mc_move", "mc_mine", "mc_build",
-            "mc_craft", "mc_combat", "mc_manage", "mc_plan",
-            "mc_screenshot", "mc_command", "mc_story", "mc_registry",
-            "mc_chat", "mc_no_op",
-        ],
-        "includes": [],
-    },
-
     "discord": {
         "description": "Discord read and participate tools (fetch messages, search members, create threads)",
         "tools": ["discord"],
@@ -268,48 +257,6 @@ TOOLSETS = {
             "yb_send_dm",
             "yb_search_sticker",
             "yb_send_sticker",
-        ],
-        "includes": []
-    },
-
-    "altercraft": {
-        "description": "Embodied Minecraft interaction (AlterCraft) — full bot control: perception, movement, combat, crafting, inventory, social, team, fair-play.",
-        "tools": [
-            # Perception
-            "altercraft_status", "altercraft_look", "altercraft_look_at",
-            "altercraft_scene", "altercraft_map", "altercraft_listen",
-            "altercraft_overhear", "altercraft_social", "altercraft_sounds",
-            "altercraft_commands", "altercraft_find_entities",
-            # Inventory
-            "altercraft_inventory", "altercraft_list_container",
-            "altercraft_deposit", "altercraft_withdraw", "altercraft_equip",
-            "altercraft_toss", "altercraft_sort_inventory", "altercraft_dump_excess",
-            # Movement
-            "altercraft_goto", "altercraft_stop", "altercraft_follow",
-            "altercraft_deathpoint", "altercraft_go_mark", "altercraft_marks",
-            "altercraft_mark", "altercraft_unmark", "altercraft_wait",
-            # Combat
-            "altercraft_attack", "altercraft_fight", "altercraft_flee",
-            "altercraft_sneak", "altercraft_shield_block", "altercraft_shoot",
-            "altercraft_sprint_attack", "altercraft_critical_hit", "altercraft_strafe",
-            "altercraft_combo", "altercraft_stats", "altercraft_deaths",
-            # Gathering / Building
-            "altercraft_collect", "altercraft_dig", "altercraft_pickup",
-            "altercraft_find_blocks", "altercraft_place", "altercraft_place_fill",
-            "altercraft_interact", "altercraft_close_screen", "altercraft_use",
-            "altercraft_sleep_bed", "altercraft_eat",
-            # Crafting / Smelting
-            "altercraft_craft", "altercraft_recipes", "altercraft_smelt",
-            "altercraft_smelt_start", "altercraft_smelt_raw", "altercraft_furnace_check",
-            "altercraft_furnace_take", "altercraft_furnaces",
-            # Social / Chat
-            "altercraft_say", "altercraft_whisper",
-            # Team
-            "altercraft_team_chat", "altercraft_team_status", "altercraft_rally",
-            "altercraft_report", "altercraft_set_team", "altercraft_team_obs",
-            # Meta
-            "altercraft_set_fair_play", "altercraft_complete_command",
-            "altercraft_task_status",
         ],
         "includes": []
     },
