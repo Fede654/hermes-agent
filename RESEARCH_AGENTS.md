@@ -72,13 +72,15 @@ Stop and report when ANY of the following occurs:
 
 Do NOT loop indefinitely. The supervisor handles retry logic.
 
-## Lattice State Transitions
+## Kanban State Transitions
 
-You do NOT transition Lattice states directly. The supervisor monitors your output and handles:
+You do NOT transition kanban states directly. The supervisor's `KanbanSink` monitors your output and handles:
 - `in_progress` → your worker is running
-- Lattice comment posted = supervisor read your metric
-- `done` = experiment accepted (supervisor action)
+- Kanban comment posted = supervisor read your metric
+- `done` = experiment accepted / loop terminated (supervisor action)
 - `archived` = experiment discarded (supervisor action)
+
+If no `kanban_task_id` was passed, the supervisor falls back to `StubSink` and only `runner.log` records progress — no external state changes happen.
 
 If you need to signal an issue to the supervisor, print a line starting with `HERMES_STATUS:`:
 ```

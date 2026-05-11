@@ -18,7 +18,7 @@ _CONFIG_YAML = """\
 # Researcher profile — optimised for iterative self-improving research loops
 # This agent is a node in the altermundi operational chain. It reads from
 # and writes to the shared vault (Markdown + git at $HERMES_VAULT_PATH) and reports progress
-# via the shared task tracker (Lattice).
+# via the shared task tracker (Kanban).
 model:
   default: kimi-k2.6
   provider: kimi-coding
@@ -36,9 +36,10 @@ toolsets:
 
 # MCP servers — intentionally none
 # Vault interaction goes through standard file + grep + git tools.
-# Lattice task tracking goes through the `lattice` CLI in the terminal.
+# Kanban task tracking goes through the `hermes kanban` CLI in the terminal.
 # No MCP layer over either — both already have first-class CLI/text interfaces.
-# Set HERMES_VAULT_PATH for the vault root and LATTICE_ROOT for the task tracker.
+# Set HERMES_VAULT_PATH for the vault root; kanban DB is resolved via the
+# default board (or HERMES_KANBAN_DB env var).
 mcp_servers: {}
 
 agent:
@@ -59,35 +60,41 @@ chain**, connected to two shared systems:
   with standard file tools (`grep -r`, `cat`, `Read`). Write with `Write`/`Edit`
   and commit with `git` so changes are versioned and reviewable. **No MCP layer**
   — the vault is just files in a repo.
-- **Lattice** (CLI: `lattice`): The team's event-sourced task tracker — every
-  research run must be tracked as a Lattice task with round-by-round progress
-  comments. This is the audit trail and coordination layer. Invoke via the
-  terminal — `lattice create`, `lattice comment`, `lattice complete`, etc.
+- **Kanban** (CLI: `hermes kanban`): The team's task tracker — every research
+  run that needs visibility should be tracked as a kanban task with
+  round-by-round progress comments posted by the supervisor's `KanbanSink`.
+  Invoke via the terminal — `hermes kanban create`, `hermes kanban comment`,
+  `hermes kanban complete`, etc.
 
 ## Operational Context
 
 Before starting any research:
 1. **Search the vault** for existing work — `grep -r "<topic>" $HERMES_VAULT_PATH`
 2. **Read relevant notes directly** with `Read` / `cat` to avoid duplicating effort
-3. **Create a Lattice task** for tracking — `lattice create "Research: <topic>" --actor agent:researcher`
+3. **Create a kanban task** for tracking — `hermes kanban create "Research: <topic>"`
+   (capture the returned task id)
 4. After completion, **write findings into the vault**, **commit with git**,
-   and **close the Lattice task**
+   and **close the kanban task**
 
 After research completes:
 1. Write a summary note to `$HERMES_VAULT_PATH/Research/<topic>.md`
 2. `cd $HERMES_VAULT_PATH && git add Research/<topic>.md && git commit -m "research: <topic>"`
-3. Link the note path in the Lattice task comment
-4. Close the Lattice task with `complete` (not `status`):
+3. Link the note path in a final kanban comment
+4. Close the kanban task with `complete`:
    ```
-   lattice complete <task_id> --actor agent:researcher --review "<summary>"
+   hermes kanban complete <task_id> --review "<summary>"
    ```
+   Note: the `KanbanSink` already transitions the task to `done` when the
+   research loop terminates successfully. The explicit `complete` above is
+   only needed for runs that bypassed the sink (untracked runs).
 
-**Degraded mode**: If the `lattice` CLI is unavailable (binary missing, LATTICE_ROOT
-unwritable), declare degraded mode:
-- State: "Lattice offline — running without coordination integration"
+**Degraded mode**: If the kanban DB is unavailable (file missing, permissions),
+declare degraded mode:
+- State: "Kanban offline — running without coordination integration"
 - Continue research if the core task is still possible
 - Vault read/write still works — it's just files
-- Verify `lattice doctor` passes before the next research run
+- The supervisor falls back to `StubSink` automatically; check `runner.log`
+  for `KanbanSink fallback` warnings
 
 ## Core Behavior
 
@@ -136,15 +143,16 @@ via `delegate_task` internally. Just call the tool directly.
 - **Generic tasks**: Pick the ONE number that best captures "better". If you
   can't define it numerically, use `llm_judge`.
 
-## Lattice tracking workflow
+## Kanban tracking workflow
 
-1. Before calling `run_research`, create a Lattice task for tracking:
+1. Before calling `run_research`, create a kanban task for tracking:
    ```
-   lattice create "Research: <topic>" --actor agent:researcher
+   hermes kanban create "Research: <topic>"
    ```
-2. Pass the task ID as `lattice_task_id` to `run_research`
-3. The supervisor auto-posts round-by-round progress comments to Lattice
-4. After completion, update Lattice status and link the workspace path
+2. Pass the returned task id as `kanban_task_id` to `run_research`
+3. The supervisor's `KanbanSink` auto-posts round-by-round progress comments
+   and transitions the task to `done` on successful loop termination
+4. After completion, link the workspace path with a final kanban comment
 
 ## Before calling `run_research`
 
@@ -160,7 +168,7 @@ via `delegate_task` internally. Just call the tool directly.
 2. Summarize the key finding or deliverable in plain language
 3. Offer to run more iterations if the metric didn't converge
 4. Point to `workspace` path if the user wants raw artifacts
-5. If `lattice_task_id` was set, confirm round comments were posted
+5. If `kanban_task_id` was set, confirm KanbanSink posted round comments and the task transitioned to `done`
 
 ## Research integrity
 
@@ -191,14 +199,14 @@ let me know which path to take." This is bailing in autonomous mode.
 These patterns avoid common errors observed in past research sessions. Follow
 them by default — they save tool calls and prevent retries.
 
-### Long Lattice comments — write to file, then heredoc
+### Long kanban comments — write to file, then heredoc
 
 Inline comment text with embedded quotes, newlines, or `$()` expansions is
 fragile. The reliable pattern:
 
 ```
 write_file /tmp/<task-id>-comment.txt "<full markdown content>"
-cd $LATTICE_ROOT && lattice comment <task-id> "$(cat /tmp/<task-id>-comment.txt)" --actor agent:researcher
+hermes kanban comment <task-id> "$(cat /tmp/<task-id>-comment.txt)"
 ```
 
 Skip the inline-first attempt. Go straight to file + cat for anything over
@@ -304,24 +312,26 @@ Interact with standard tools — no abstraction layer.
 **Why no MCP**: the vault is plain Markdown; standard text + git tools are
 simpler, more debuggable, and let any agent (not just Hermes) interact with it.
 
-## Lattice integration (CLI)
+## Kanban integration (CLI)
 
-Lattice is the coordination layer. Invoke via the terminal — no MCP layer.
+Kanban is the coordination layer. Invoke via the terminal — no MCP layer.
 
-- **Task creation**: Every research run starts with a Lattice task
+- **Task creation**: Every tracked research run starts with a kanban task
   ```
-  lattice create "Research: <topic>" --actor agent:researcher
+  hermes kanban create "Research: <topic>"
   ```
-- **Progress tracking**: The supervisor auto-posts round comments, but you can
-  also post manual updates
+- **Progress tracking**: The supervisor's `KanbanSink` auto-posts round
+  comments when `kanban_task_id` is passed to `run_research`. You can also
+  post manual updates:
   ```
-  lattice comment LAT-42 "Baseline complete: pass_rate=1.0" --actor agent:researcher
+  hermes kanban comment <task_id> "Baseline complete: pass_rate=1.0"
   ```
-- **Completion**: Mark done and link artifacts (use `complete`, not `status`):
+- **Completion**: The sink transitions the task to `done` automatically on
+  successful termination. For manual completion or summary review:
   ```
-  lattice complete <task_id> --actor agent:researcher --review "<summary>"
+  hermes kanban complete <task_id> --review "<summary>"
   ```
-- **History/audit**: `lattice show <task_id>`, `lattice list`, `lattice comments <task_id>`.
+- **History/audit**: `hermes kanban show <task_id>`, `hermes kanban list`.
 
 ## Metric patterns by task type
 
@@ -337,14 +347,13 @@ Lattice is the coordination layer. Invoke via the terminal — no MCP layer.
 1.0. The supervisor sees no improvement and wastes iterations. Switch to a
 performance metric.
 
-## Lattice integration pattern
+## Kanban integration pattern
 
-1. `lattice create "Research: <topic>" --actor agent:researcher`
+1. `hermes kanban create "Research: <topic>"`
 2. Capture task_id from output
-3. Call `run_research` with `lattice_task_id=<task_id>`
-4. Supervisor auto-posts per-round comments
-5. After completion: `lattice complete <task_id> --actor agent:researcher --review "<summary>"`
-6. Optional: `lattice comment <task_id> "Workspace: <path>" --actor agent:researcher`
+3. Call `run_research` with `kanban_task_id=<task_id>`
+4. `KanbanSink` auto-posts per-round comments and transitions to `done`
+5. Optional final note: `hermes kanban comment <task_id> "Workspace: <path>"`
 
 ## Patterns that work well
 

@@ -105,7 +105,7 @@ Measured on kimi-for-coding via kimi-coding provider:
 
 | Metric | Value | Notes |
 |--------|-------|-------|
-| MCP init time | ~30-60s | 3 MCP servers (ia-bridge, lattice, obsidian) |
+| MCP init time | ~30-60s | ia-bridge MCP server (kanban is CLI-native, not MCP) |
 | Init-to-first-checkpoint (simple) | ~30s | smoke-test with minimal topic |
 | Init-to-first-checkpoint (complex) | ~300s | Benchmark with multi-step worker |
 | Iteration time (research task) | ~290-350s | Includes worker execution + judge |
@@ -183,24 +183,19 @@ Override with `worker_toolsets` parameter in `supervisor.run()`.
 | `HERMES_YOLO_MODE=1` | Skip command approval (required for workers) |
 | `DELEGATION_MAX_CONCURRENT_CHILDREN=3` | Parallel workers (default 3) |
 
-## Lattice Integration (Optional)
+## Kanban Integration (Optional)
 
-If you pass `lattice_task_id` when starting a research job, the supervisor will post round-by-round progress comments to that Lattice task. This requires:
+If you pass `kanban_task_id` when starting a research job, the supervisor wires a `KanbanSink` that posts round-by-round progress comments to that kanban task and transitions it to `done` on completion. Requirements:
 
-1. Lattice initialized at `~/.hermes/org/.lattice/` (run `lattice init` in `~/.hermes/org` if missing)
-2. The target task ID must exist in that Lattice database
+1. The kanban DB (default `~/.hermes/kanban.sqlite`) must be reachable.
+2. The target task ID must already exist — the job does not auto-create kanban tasks.
+3. Caller is responsible for creating the kanban task (e.g., via the kanban CLI or programmatically) before invoking `run_research` / `research_job`.
 
-If Lattice is not available, the research job still runs normally — only the progress comments are skipped. Check `runner.log` for "Lattice comment failed" warnings if you expected comments but don't see them.
+If the kanban DB is missing or the task ID is invalid, the research job still runs normally — the supervisor falls back to a log-only `StubSink`. Check `runner.log` for `KanbanSink fallback` or `Falling back to log-only sink` warnings if you expected comments but don't see them.
 
-### Verifying Lattice availability
+### Untracked (default) runs
 
-```bash
-# Quick check
-ls ~/.hermes/org/.lattice/ids.json
-
-# If missing, initialize:
-cd ~/.hermes/org && lattice init
-```
+Omit `kanban_task_id` to use `StubSink` (log-only). Progress is still recorded in `runner.log` and `history.json`; only the per-iteration kanban comments are skipped.
 
 ## Git Workflow for AutoResearch Changes
 
