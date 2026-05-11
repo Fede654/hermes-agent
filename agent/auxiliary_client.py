@@ -161,7 +161,26 @@ _PROVIDER_ALIASES = {
     "tencentmaas": "tencent-tokenhub",
 }
 
-# Cache for resolve_provider_client to avoid repeated auth resolution
+# Cache for resolve_provider_client to avoid repeated auth resolution.
+#
+# Scope:    process lifetime, no TTL, no automatic eviction.
+# Safety:   credential-distinguishing fields (provider, explicit_api_key,
+#           explicit_base_url, and the sorted-tuple flattening of
+#           main_runtime) are part of the cache key, so a client built
+#           for credentials A is never served for credentials B.
+#
+#           When OAuth-backed credentials are refreshed (see
+#           _refresh_provider_credentials), _evict_cached_clients()
+#           clears BOTH this cache and the lower-level _client_cache for
+#           the affected provider so the next call rebuilds the client
+#           with the fresh access_token. The OpenAI client objects
+#           themselves do not auto-refresh — they snapshot api_key at
+#           construction — which is why eviction is necessary.
+#
+# Limit:    the main_runtime flattening is one level deep. Adding a
+#           nested dict/list value to main_runtime will raise TypeError
+#           at cache key construction. Tests pin this so a regression
+#           surfaces clearly. See tests/agent/test_auxiliary_client_cache.py.
 _resolve_provider_cache: dict[tuple, tuple] = {}
 _resolve_provider_cache_lock = threading.Lock()
 
@@ -1894,7 +1913,14 @@ def _is_unsupported_temperature_error(exc: Exception) -> bool:
 
 
 def _evict_cached_clients(provider: str) -> None:
-    """Drop cached auxiliary clients for a provider so fresh creds are used."""
+    """Drop cached auxiliary clients for a provider so fresh creds are used.
+
+    Clears entries from BOTH _client_cache (low-level lookup cache) and
+    _resolve_provider_cache (high-level resolver cache). Both caches store
+    OpenAI client objects whose api_key was snapshotted at construction
+    time, so post-refresh both layers must be invalidated for the new
+    access_token to take effect on the next call.
+    """
     normalized = _normalize_aux_provider(provider)
     with _client_cache_lock:
         stale_keys = [
@@ -1912,6 +1938,13 @@ def _evict_cached_clients(provider: str) -> None:
                 except Exception:
                     pass
             _client_cache.pop(key, None)
+    with _resolve_provider_cache_lock:
+        stale_resolve_keys = [
+            key for key in _resolve_provider_cache
+            if _normalize_aux_provider(str(key[0])) == normalized
+        ]
+        for key in stale_resolve_keys:
+            _resolve_provider_cache.pop(key, None)
 
 
 def _refresh_provider_credentials(provider: str) -> bool:
