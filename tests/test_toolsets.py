@@ -231,6 +231,31 @@ class TestToolsetConsistency:
         assert len(core) > 20, f"Suspiciously small shared core: {len(core)} tools"
 
 
+class TestResearchToolset:
+    """The 'research' toolset must expose both the synchronous run_research
+    entry point and the durable detached research_job variant."""
+
+    def test_research_toolset_exposes_run_research(self):
+        assert "run_research" in TOOLSETS["research"]["tools"]
+
+    def test_research_toolset_exposes_research_job(self):
+        assert "research_job" in TOOLSETS["research"]["tools"], (
+            "research_job is the long-running detached entry point and must be "
+            "callable from the researcher profile"
+        )
+
+    def test_research_job_schema_polling_reference_is_correct(self):
+        from tools.research_job_tool import RESEARCH_JOB_SCHEMA
+        desc = RESEARCH_JOB_SCHEMA["description"]
+        assert "research_job_status" not in desc, (
+            "Schema must not reference the non-existent research_job_status tool"
+        )
+        assert "action='status'" in desc or 'action="status"' in desc, (
+            "Schema must document the actual polling interface "
+            "(research_job(action='status'))"
+        )
+
+
 class TestPluginToolsets:
     def test_get_all_toolsets_includes_plugin_toolset(self, monkeypatch):
         reg = ToolRegistry()

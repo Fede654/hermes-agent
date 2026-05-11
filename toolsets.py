@@ -121,8 +121,8 @@ TOOLSETS = {
     },
 
     "research": {
-        "description": "Iterative self-improving research loop: run_research spawns worker subagents, scores output against a metric, and applies LLM-guided hypothesis revision across iterations (Karpathy + Autogenesis AOOR loop)",
-        "tools": ["run_research"],
+        "description": "Iterative self-improving research loop: run_research spawns worker subagents, scores output against a metric, and applies LLM-guided hypothesis revision across iterations (Karpathy + Autogenesis AOOR loop). research_job is the detached, resumable variant for long-running loops (>5min).",
+        "tools": ["run_research", "research_job"],
         "includes": []
     },
     

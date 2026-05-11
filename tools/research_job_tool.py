@@ -66,8 +66,10 @@ RESEARCH_JOB_SCHEMA = {
         "NOT FOR:\n"
         "- One-shot tasks (use delegate_task directly)\n"
         "- Tasks that fit in a single agent turn (use run_research)\n\n"
-        "IMPORTANT: This tool spawns a background process. Poll status with "
-        "`research_job_status` or wait for the process completion notification."
+        "IMPORTANT: This tool spawns a background process. Poll progress with "
+        "research_job(action='status', job_id=<id>), collect the final result "
+        "with research_job(action='collect', job_id=<id>), or wait for the "
+        "process completion notification."
     ),
     "parameters": {
         "type": "object",
