@@ -33,7 +33,16 @@ def _write_job_spec(job_id: str, spec: dict[str, Any]) -> Path:
 
 
 def _load_config_for_job() -> dict[str, Any]:
-    """Read Hermes config to extract model/provider/base_url for the runner."""
+    """Read Hermes config to extract model/provider/base_url for the runner.
+
+    For api_key resolution: when KIMI_API_KEY is set, we pin it in the spec
+    so the detached runner uses the explicit override. When unset (the
+    typical case on this fork, where Kimi auth is OAuth via
+    ~/.kimi/credentials/kimi-code.json), we omit the field entirely so
+    the auxiliary_client falls through to resolve_kimi_coding_runtime_credentials
+    and picks up the OAuth access_token. Pinning api_key="" here would force
+    the resolver to treat that as an explicit (empty) override.
+    """
     import yaml
     config_path = get_hermes_home() / "config.yaml"
     if not config_path.exists():
@@ -41,12 +50,15 @@ def _load_config_for_job() -> dict[str, Any]:
     cfg = yaml.safe_load(config_path.read_text())
     model_cfg = cfg.get("model", {})
     delegation_cfg = cfg.get("delegation", {})
-    return {
+    spec = {
         "model": delegation_cfg.get("model") or model_cfg.get("default", "kimi-for-coding"),
         "provider": delegation_cfg.get("provider") or model_cfg.get("provider", "kimi-coding"),
         "base_url": delegation_cfg.get("base_url") or model_cfg.get("base_url", "https://api.kimi.com/coding/v1"),
-        "api_key": os.getenv("KIMI_API_KEY", ""),
     }
+    api_key = os.getenv("KIMI_API_KEY", "").strip()
+    if api_key:
+        spec["api_key"] = api_key
+    return spec
 
 
 # ---------------------------------------------------------------------------
@@ -174,9 +186,13 @@ def _action_start(args: dict[str, Any]) -> str:
         "model": cfg.get("model"),
         "provider": cfg.get("provider"),
         "base_url": cfg.get("base_url"),
-        "api_key": cfg.get("api_key"),
         "toolsets": ["research", "terminal", "file", "web"],
     }
+    # Only pin api_key in the spec when it's an explicit override (env var
+    # set). Omitting it lets the detached runner resolve OAuth credentials
+    # via the standard auxiliary_client path.
+    if cfg.get("api_key"):
+        spec["api_key"] = cfg["api_key"]
 
     spec_path = _write_job_spec(job_id, spec)
     job_dir = _job_dir(job_id)
@@ -189,8 +205,8 @@ def _action_start(args: dict[str, Any]) -> str:
     )
 
     # Spawn via terminal_tool in background
-    from tools.terminal_tool import terminal
-    raw = terminal(
+    from tools.terminal_tool import terminal_tool
+    raw = terminal_tool(
         command=cmd,
         background=True,
         notify_on_complete=True,
@@ -325,8 +341,8 @@ def _action_resume(args: dict[str, Any]) -> str:
         f"HERMES_YOLO_MODE=1 python -m agent.research.job_runner {shlex.quote(str(spec_path))}"
     )
 
-    from tools.terminal_tool import terminal
-    raw = terminal(
+    from tools.terminal_tool import terminal_tool
+    raw = terminal_tool(
         command=cmd,
         background=True,
         notify_on_complete=True,
