@@ -94,6 +94,9 @@ _HERMES_ENV_PATH = (
 )
 _PROJECT_ENV_PATH = r'(?:(?:/|\.{1,2}/)?(?:[^\s/"\'`]+/)*\.env(?:\.[^/\s"\'`]+)*)'
 _PROJECT_CONFIG_PATH = r'(?:(?:/|\.{1,2}/)?(?:[^\s/"\'`]+/)*config\.yaml)'
+# Shell rc and credential files — composed into _SENSITIVE_WRITE_TARGET
+# below and matched by the tee/redirection DANGEROUS_PATTERNS. These BLOCK
+# writes (the agent must request approval); they are not an allowlist.
 _SHELL_RC_FILES = (
     r'(?:~|\$home|\$\{home\})/\.'
     r'(?:bashrc|zshrc|profile|bash_profile|zprofile)\b'
@@ -224,7 +227,8 @@ def _hardline_block_result(description: str) -> dict:
 # =========================================================================
 
 DANGEROUS_PATTERNS = [
-    # Specific allowlisted commands (must come before broader patterns)
+    # Specific blocked commands (more specific patterns must come before
+    # broader patterns so the more descriptive message wins).
     (r'\brm\s+(-[^\s]*\s+)*/tmp\b', "rm -rf /tmp"),
     (r'\brm\s+(-[^\s]*\s+)*/', "delete in root path"),
     (r'\brm\s+-[^\s]*r', "recursive delete"),

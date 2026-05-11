@@ -108,6 +108,37 @@ class TestDetectSqlPatterns:
         assert desc is None
 
 
+class TestDetectSensitiveWriteTargets:
+    """Pin block-on-write behavior for shell-rc and credential files.
+
+    These targets are composed into _SENSITIVE_WRITE_TARGET and matched by
+    the tee/redirection patterns in DANGEROUS_PATTERNS. They BLOCK, they
+    do not allowlist. See the section comment above _SHELL_RC_FILES in
+    tools/approval.py.
+    """
+
+    def test_redirect_to_bashrc_is_blocked(self):
+        is_dangerous, _, desc = detect_dangerous_command("echo evil >> ~/.bashrc")
+        assert is_dangerous is True
+        assert "system file" in desc.lower() or "redirection" in desc.lower()
+
+    def test_redirect_to_zshrc_is_blocked(self):
+        is_dangerous, _, _ = detect_dangerous_command("echo evil >> ~/.zshrc")
+        assert is_dangerous is True
+
+    def test_tee_to_zshrc_is_blocked(self):
+        is_dangerous, _, _ = detect_dangerous_command("echo evil | tee -a ~/.zshrc")
+        assert is_dangerous is True
+
+    def test_redirect_to_netrc_is_blocked(self):
+        is_dangerous, _, _ = detect_dangerous_command("echo creds > ~/.netrc")
+        assert is_dangerous is True
+
+    def test_redirect_to_npmrc_is_blocked(self):
+        is_dangerous, _, _ = detect_dangerous_command("echo token > ~/.npmrc")
+        assert is_dangerous is True
+
+
 class TestSafeCommand:
     def test_echo_is_safe(self):
         is_dangerous, key, desc = detect_dangerous_command("echo hello world")
