@@ -355,6 +355,148 @@ performance metric.
 4. `KanbanSink` auto-posts per-round comments and transitions to `done`
 5. Optional final note: `hermes kanban comment <task_id> "Workspace: <path>"`
 
+## Resume protocol (when reclaiming an in-progress task)
+
+When you `claim` a kanban task, **before doing anything else**, check
+whether you are resuming previous work. The kanban task survives across
+iteration-budget exhaustion and worker crashes; your workspace and
+detached background jobs are designed to outlive any single run.
+
+### Step 0: read `workspace/STATE.json`
+
+```
+cat $WORKSPACE/STATE.json 2>/dev/null
+```
+
+If it exists, **the previous run wrote it**. Treat its contents as
+authoritative. Schema:
+
+```json
+{
+  "phase": "baseline-running | baseline-done | iter-N-running | iter-N-done | reporting | complete",
+  "started_at": "<ISO8601>",
+  "last_run_at": "<ISO8601>",
+  "expected_completion_estimate": "<ISO8601 or null>",
+  "detached_jobs": [
+    {
+      "pid": <int>,
+      "started_at": "<ISO8601>",
+      "purpose": "baseline-runner | iter-N-runner | ...",
+      "log_path": "<path>",
+      "expected_artifacts": ["<path>", ...]
+    }
+  ],
+  "completed_artifacts": ["<path>", ...],
+  "next_action": "wait | check-results | advance | report",
+  "notes": "<free-form, last heartbeat reason>"
+}
+```
+
+If STATE.json does NOT exist, you are starting fresh; create one as your
+**first non-read action** with `phase: planning` and write it again
+after each meaningful state change.
+
+### Step 1: verify detached jobs
+
+For each `detached_jobs[].pid`:
+
+```
+ls /proc/<pid> 2>/dev/null && echo alive || echo dead
+```
+
+- **alive + expected_artifacts not yet on disk** → the job is still
+  running. Update STATE.json's `last_run_at`, post a kanban heartbeat
+  with "still in flight (uptime Xm)", and **exit your run with a short
+  summary**. Do NOT poll in a busy loop — let the next claim handle
+  the next checkpoint.
+- **alive + some expected_artifacts appeared** → partial completion;
+  process what's available, advance STATE.json, exit.
+- **dead + expected_artifacts complete** → job finished cleanly;
+  advance `phase`, process results, write the next heartbeat.
+- **dead + expected_artifacts missing** → job died mid-run; either
+  rerun it (mark a retry count) or escalate to human via kanban
+  `block` with a reason.
+
+### Step 2: launch detached jobs correctly
+
+Heavy jobs (anything over ~30s) MUST be detached so they survive your
+own worker exit. Use `setsid` to put the child in a new session/group:
+
+```bash
+LOG=/tmp/researcher_${TASK_ID}_${PURPOSE}.log
+setsid bash -c "<command>" </dev/null >>$LOG 2>&1 &
+PID=$!
+disown $PID
+```
+
+Record the PID + log path in STATE.json immediately. Do NOT block on
+the job within the same iteration that launched it.
+
+### Step 3: update STATE.json before every kanban write
+
+Sequence per iteration:
+
+1. Read STATE.json (or initialize if absent).
+2. Do the one piece of work this iteration calls for.
+3. Update STATE.json reflecting the new state.
+4. Post kanban heartbeat with a 1-line summary.
+5. Exit.
+
+The kanban dispatcher will reclaim and re-spawn you when appropriate.
+Budget per run is small (~80 iterations of tool use), but the **task
+itself is unbounded** — you can take 20 runs across a day to complete
+a slow experiment.
+
+### When you genuinely have nothing to do (job still running)
+
+Post a heartbeat with the uptime + ETA, then exit cleanly. **Do not
+poll** the job in a loop within the same run — that wastes iteration
+budget. The dispatcher's tick interval handles the polling cadence
+for you.
+
+```
+hermes kanban heartbeat <task_id> --note "baseline-runner pid=<P> uptime=42min eta=<ETA>"
+# … then return your final summary and stop
+```
+
+### Closing your run when work is yielded — block, don't text-only-exit
+
+The kanban-worker harness treats **any run that exits without calling
+`kanban_complete` or `kanban_block`** as `crashed`. After several such
+"crashes" the dispatcher hits `gave_up` and the task stops being
+auto-reclaimed.
+
+When the resume protocol determines the detached job is still running,
+the correct closing move is:
+
+```
+hermes kanban block <task_id> "Waiting on detached job pid=<P> at <log>. Re-evaluate when results appear at <expected_artifact>."
+```
+
+This is a **cooperative yield**, not a permanent block. The detached
+job is expected to call `hermes kanban unblock <task_id>` when it
+completes — that's the wake-up signal. The dispatcher will reclaim
+and re-spawn you to process results.
+
+Three actors cooperate:
+
+```
+  worker run N         detached job              worker run N+1
+     │                     │                          │
+     ▼                     ▼                          ▼
+  check STATE              run             reclaim after unblock
+  post heartbeat       (no kanban           re-read STATE
+  KANBAN BLOCK ◀─────  awareness)           process new artifacts
+  exit                     │                advance phase
+                           ▼                or KANBAN BLOCK again
+                       on success:               or COMPLETE
+                       call kanban unblock
+```
+
+If you forget the `kanban block` call, you'll hit `gave_up` after a
+few runs and stall the task. **The block call is what makes the
+resume cooperative**.
+
 ## Patterns that work well
 
 - For literature search: evaluation_mode="llm_judge" with specific criteria beats self_report
