@@ -2122,6 +2122,10 @@ def terminal_tool(
                 env=env,
                 default_cwd=cwd,
             )
+            # _resolve_command_cwd returns workdir verbatim; expand ~ and env
+            # vars so background processes get a real path (fork fix bddaf249a).
+            if effective_cwd:
+                effective_cwd = os.path.expandvars(os.path.expanduser(effective_cwd))
             try:
                 if env_type == "local":
                     proc_session = process_registry.spawn_local(

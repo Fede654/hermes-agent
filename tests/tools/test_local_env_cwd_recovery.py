@@ -51,6 +51,20 @@ class TestResolveSafeCwd:
         monkeypatch.setattr(os.path, "isdir", lambda p: p == sep)
         assert _resolve_safe_cwd("/no/such/deep/dir") == sep
 
+    def test_expands_tilde_to_home(self, monkeypatch, tmp_path):
+        """Paths with ~ must be expanded before checking existence."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        nested = tmp_path / "Projects" / "DaemonCraft"
+        nested.mkdir(parents=True)
+        assert _resolve_safe_cwd("~/Projects/DaemonCraft") == str(nested)
+
+    def test_expands_environment_variables(self, monkeypatch, tmp_path):
+        """Paths with $VAR must be expanded before checking existence."""
+        monkeypatch.setenv("DAEMONCRAFT_ROOT", str(tmp_path))
+        nested = tmp_path / "agents" / "bot"
+        nested.mkdir(parents=True)
+        assert _resolve_safe_cwd("$DAEMONCRAFT_ROOT/agents/bot") == str(nested)
+
 
 def _fake_interrupt():
     return threading.Event()
