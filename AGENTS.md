@@ -210,6 +210,17 @@ source .venv/bin/activate   # or: source venv/bin/activate
 `$HOME/.hermes/hermes-agent/venv` (for worktrees that share a venv with the
 main checkout).
 
+## Fork Branch Workflow
+
+This fork uses a two-layer branch model. See `FORK_WORKFLOW.md` for the full procedure.
+
+- `nousmain` is the local mirror of `upstream/main`. Do not commit directly to it.
+- `main` is the integration branch deployed to `~/.hermes/hermes-agent`.
+- Canonical feature/fix branches should be clean patch stacks over `nousmain`, not over `main`.
+- Active canonical branches are documented in `FORK_WORKFLOW.md`.
+- Before push/pull, run `git remote -v` and verify `origin` vs `upstream`.
+- After meaningful fork sync/deploy, also run the CompAII rebirth sync (`python ~/Projects/compaii-state/sync.py`).
+
 ## Project Structure
 
 File counts shift constantly — don't treat the tree below as exhaustive.
