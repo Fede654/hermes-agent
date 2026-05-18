@@ -55,8 +55,8 @@ _HERMES_CORE_TOOLS = [
     "session_search",
     # Clarifying questions
     "clarify",
-    # Code execution + delegation
-    "execute_code", "delegate_task",
+    # Code execution + delegation + research loop
+    "execute_code", "delegate_task", "run_research", "research_job",
     # Cronjob management
     "cronjob",
     # Cross-platform messaging (gated on gateway running via check_fn)
@@ -170,6 +170,12 @@ TOOLSETS = {
         "includes": []
     },
     
+    "research": {
+        "description": "Iterative self-improving research loop: run_research spawns worker subagents, scores output against a metric, and applies LLM-guided hypothesis revision across iterations. research_job is the detached, resumable variant for long-running loops (>5min).",
+        "tools": ["run_research", "research_job"],
+        "includes": []
+    },
+
     "browser": {
         "description": "Browser automation for web interaction (navigate, click, type, scroll, iframes, hold-click) with web search for finding URLs",
         "tools": [
