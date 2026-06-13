@@ -100,7 +100,10 @@ class StrategyRun:
         if self.baseline_metric is None or self.best_metric is None:
             return None
         if self.baseline_metric == 0:
-            return float("inf") if self.best_metric != 0 else 0.0
+            # Rate relative to a zero baseline is undefined (not inf — inf
+            # poisons mean_improvement_rate and the {:.2%} report). A genuine
+            # no-change (best also 0) is a well-defined 0.0.
+            return 0.0 if self.best_metric == 0 else None
         return (self.best_metric - self.baseline_metric) / abs(self.baseline_metric)
 
 

@@ -128,7 +128,9 @@ class TestStrategyRun:
         )
         assert run.improvement_rate == 0.0
 
-    def test_improvement_rate_inf(self):
+    def test_improvement_rate_undefined_for_zero_baseline(self):
+        # A rate relative to a zero baseline is undefined → None, NOT +inf.
+        # inf poisons mean_improvement_rate and the {:.2%} report.
         hist = _make_history(
             baseline_metric=0.0,
             results=[
@@ -139,7 +141,7 @@ class TestStrategyRun:
         run = StrategyRun(
             strategy_name="seq", repeat=0, history=hist, elapsed_sec=1.0, workspace=Path("/tmp")
         )
-        assert run.improvement_rate == float("inf")
+        assert run.improvement_rate is None
 
 
 # ---------------------------------------------------------------------------
