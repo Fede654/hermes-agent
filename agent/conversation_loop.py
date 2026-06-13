@@ -1319,6 +1319,12 @@ def run_conversation(
                             force=True,
                         )
                         finish_reason = "length"
+                    if finish_reason != "length" and agent._has_truncated_tool_call_args(assistant_message):
+                        agent._vprint(
+                            f"{agent.log_prefix}⚠️  Tool-call arguments truncated mid-generation (invalid JSON) — treating as length-truncation so the retry/boost path recovers it",
+                            force=True,
+                        )
+                        finish_reason = "length"
 
                 if finish_reason == "length":
                     if getattr(response, "id", "") == PARTIAL_STREAM_STUB_ID:
