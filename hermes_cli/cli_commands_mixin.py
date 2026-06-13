@@ -1837,14 +1837,22 @@ class CLICommandsMixin:
                 _cprint(f"  {_DIM}No active goal.{_RST}")
             return
 
-        # Otherwise treat the arg as the goal text.
+        # Otherwise treat the arg as the goal text. Parse an optional trailing
+        # metric criterion ("..., pass_rate >= 0.9") so the goal judge can
+        # short-circuit deterministically (Phase B — metric-aware /goal).
+        from hermes_cli.goals import _split_goal_text_and_criterion
+        text, metric_key, criterion = _split_goal_text_and_criterion(arg)
         try:
-            state = mgr.set(arg)
+            state = mgr.set(
+                text, metric_key=metric_key, acceptance_criterion=criterion
+            )
         except ValueError as exc:
             _cprint(f"  Invalid goal: {exc}")
             return
 
         _cprint(f"  ⊙ Goal set ({state.max_turns}-turn budget): {state.goal}")
+        if state.acceptance_criterion:
+            _cprint(f"  {_DIM}Metric criterion: {state.acceptance_criterion}{_RST}")
         _cprint(
             f"  {_DIM}After each turn, a judge model will check if the goal is done. "
             f"Hermes keeps working until it is, you pause/clear it, or the budget is "
