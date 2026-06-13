@@ -125,26 +125,46 @@ def _is_heartbeat_stale(job_dir: Path) -> bool:
 # Process control — SIGTERM with SIGKILL escalation.
 # ---------------------------------------------------------------------------
 
+def _signal_tree(proc: subprocess.Popen, sig: int) -> bool:
+    """Send *sig* to the child's whole process group when possible.
+
+    The child is spawned with ``start_new_session=True`` (POSIX), so it leads
+    its own group and the signal reaches delegated workers / terminal
+    subprocesses too — otherwise a killed job orphans its descendants. Falls
+    back to a single-PID signal on Windows or if the group lookup fails.
+    Returns False if the process is already gone.
+    """
+    if os.name == "posix" and hasattr(os, "killpg"):
+        try:
+            os.killpg(os.getpgid(proc.pid), sig)
+            return True
+        except ProcessLookupError:
+            return False
+        except OSError:
+            pass  # fall through to single-PID
+    try:
+        os.kill(proc.pid, sig)
+        return True
+    except ProcessLookupError:
+        return False
+
+
 def _kill_with_escalation(proc: subprocess.Popen) -> None:
-    """SIGTERM, wait grace period, SIGKILL if still alive.
+    """SIGTERM the process tree, wait grace period, SIGKILL if still alive.
 
     Mirrors the pattern documented in DESIGN-HRM94-95.md but expressed
     against subprocess.Popen rather than multiprocessing.Process.
     """
     if proc.poll() is not None:
         return
-    try:
-        os.kill(proc.pid, signal.SIGTERM)
-    except ProcessLookupError:
+    if not _signal_tree(proc, signal.SIGTERM):
         return
     try:
         proc.wait(timeout=_SIGTERM_GRACE)
         return
     except subprocess.TimeoutExpired:
         pass
-    try:
-        os.kill(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
+    if not _signal_tree(proc, signal.SIGKILL):
         return
     try:
         proc.wait(timeout=1)
@@ -178,7 +198,8 @@ def _child_main(spec_path: str) -> int:
     or kill the parent overwrites status itself.
     """
     spec = json.loads(Path(spec_path).read_text())
-    job_dir = Path(spec["job_dir"])
+    # Spec lives inside job_dir; fall back to its parent if the key is absent.
+    job_dir = Path(spec.get("job_dir") or Path(spec_path).parent)
     job_dir.mkdir(parents=True, exist_ok=True)
 
     _setup_logging(job_dir)
@@ -264,10 +285,17 @@ def _spawn_child(spec_path: str) -> subprocess.Popen:
     so the child re-imports the module from a clean interpreter — no
     forked SQLite handles, no carried-over logging state.
     """
+    # Drain output to a file so a chatty child can't deadlock on a full PIPE
+    # buffer (the parent only poll()s, it never reads the pipes), and keep the
+    # logs for debugging. start_new_session puts the child in its own group so
+    # timeout/stale kills reap the whole tree (see _signal_tree).
+    child_log = (Path(spec_path).parent / "child.log").open("ab")
+    popen_kwargs: dict[str, Any] = {"start_new_session": True} if os.name == "posix" else {}
     return subprocess.Popen(
         [sys.executable, "-m", "agent.research.job_runner", "--child", spec_path],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=child_log,
+        stderr=subprocess.STDOUT,
+        **popen_kwargs,
     )
 
 
@@ -278,7 +306,8 @@ def main(spec_path: str) -> int:
     another instance of the same job already holds the lock.
     """
     spec = json.loads(Path(spec_path).read_text())
-    job_dir = Path(spec["job_dir"])
+    # Spec lives inside job_dir; fall back to its parent if the key is absent.
+    job_dir = Path(spec.get("job_dir") or Path(spec_path).parent)
     job_dir.mkdir(parents=True, exist_ok=True)
 
     # Lock to prevent concurrent runs of the same job.
