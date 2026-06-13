@@ -1,110 +1,151 @@
-# Fork Workflow — nicoechaniz/hermes-agent
+# Fork Workflow — Fede654/hermes-agent
 
-This repository is Nicolás' Hermes Agent fork. It intentionally carries local features that may or may not be upstreamed. Keep this file current whenever the branch topology changes.
+This repository is Fede's Hermes Agent fork. It sits **downstream of Nicolás'
+fork** (`nicoechaniz`), which itself tracks NousResearch upstream. Fede's fork
+adds research-specific features on top, and **replicates the result across
+several agents** rather than a single runtime.
 
-## Branch roles
+Adapted from Nicolás' original `FORK_WORKFLOW.md` (the branch-topology
+discipline is his). The differences here: a third layer (Nous → Nico → Fede)
+and a tag-based, multi-agent release ritual.
 
-| Branch | Role | Rules |
-|--------|------|-------|
-| `upstream/main` | NousResearch upstream | Read-only reference. Fetch from `https://github.com/NousResearch/hermes-agent.git`. |
-| `nousmain` | Local mirror of upstream main | Must match `upstream/main` exactly after each upstream sync. Do not commit directly. |
-| `main` | Integration branch for our runtime | Merge `nousmain` plus all active canonical feature branches. This is what gets deployed to `~/.hermes/hermes-agent`. |
-| `feat/*` / `fix/*` | Canonical fork features/fixes | Branch from `nousmain`, not from `main`, unless explicitly creating a short-lived integration/docs cleanup branch. Each branch must apply cleanly over `nousmain`. |
-| `backup/*` / `*-legacy` | Safety archives | Do not merge. Keep only while useful for recovery. |
+Keep this file current whenever the branch topology or release process changes.
 
-## Current canonical feature branches
+## Layers
 
-These are the active branches we intentionally preserve as separable patches over `nousmain`:
-
-| Branch | Purpose | Notes |
-|--------|---------|-------|
-| `feat/kimi` | Kimi support and corrections | Kimi CLI OAuth from `~/.kimi/credentials/kimi-code.json`; `X-Msh-*` headers; runtime credential resolution; Kimi OAuth refresh on auxiliary 401; Kimi K2.x context-length fixes. This replaces the old `feat/kimi-oauth-clean*` and `fix/kimi-context-length-resolution` branches. |
-| `feat/daemoncraft` | DaemonCraft gateway / embodied-agent integration | Canonical DaemonCraft patch set. Keep clean over `nousmain`; old messy history lives only in `feat/daemoncraft-legacy` / backups. |
-| `feat/minimax-defaults` | MiniMax defaults | Provider defaults for MiniMax Anthropic Messages transport and base URL behavior. |
-| `feat/kanban-review` | Kanban review orchestration | Review graph/templates/CLI wiring for `hermes kanban review`. |
-| `feat/altermundi-cli` | CLI input / interrupt behavior | Ctrl+C priority, interrupt transcript safety, multimodal requeue, TUI config support. |
-| `feat/altermundi-tui` | TUI history behavior | History navigation behavior in the Ink TUI. |
-
-If a branch is superseded, delete the remote branch after the replacement is merged and verified. Leave a local `backup/*` branch only when recent recovery is useful.
-
-## Sync workflow
-
-Before any push or pull, verify remotes:
-
-```bash
-git remote -v
+```
+NousResearch/hermes-agent   (upstream — canonical Hermes)
+        │  fetch, read-only
+        ▼
+nicoechaniz/hermes-agent    (Nico's fork — adds kimi, daemoncraft, minimax,
+        │                     kanban-review, altermundi; syncs upstream)
+        │  PRs flow back up (sync, fixes)
+        ▼
+Fede654/hermes-agent        (this fork — adds autoresearch + metric-aware /goal;
+                              replicates to N agents via canonical tags)
 ```
 
-Update the upstream mirror:
+## Operating principles
 
-```bash
-git fetch upstream main
-git checkout nousmain
-git reset --hard upstream/main
-```
+This is an **active collaboration with Nico and a close track of upstream Nous**,
+not a long-lived divergent fork. Everything below serves that:
 
-Rebuild each canonical feature branch on top of the new `nousmain`:
+- **Track Nous closely, sync small and often.** Frequent small rebases beat rare
+  giant ones — the god-file refactors (authz/model-flow/cli extractions) are far
+  cheaper to absorb in weekly-sized chunks. Divergence is debt; pay it down on a
+  cadence, not when forced.
+- **Base on `nicoechaniz/main`, not Nous directly.** Nico's main already carries
+  the shared canonical features (kimi, daemoncraft, …) and his own upstream sync.
+  Basing there means Fede maintains only his *own* delta (autoresearch + `/goal`)
+  and inherits the rest for free. Fede helps keep Nico current via sync PRs — that
+  loop *is* how this fork tracks Nous.
+- **Keep Fede's delta minimal and upstreamable.** Provider-neutral, no hardcoded
+  models, clean over the base. Anything that could live in Nico's fork should go
+  there via PR, not accrete here.
+- **Push everything up promptly.** Sync PRs and autoresearch fixes flow back to
+  Nico as soon as they're validated, so the shared core never drifts from what
+  Fede actually runs.
 
-```bash
-git checkout feat/kimi
-git rebase nousmain
-# resolve conflicts, run focused tests, then push:
-git push origin feat/kimi --force-with-lease
-```
+## Branch / remote roles
 
-Repeat for each active canonical branch. Do not rebase `main` onto feature branches; `main` is rebuilt by merging branches.
+| Ref | Role | Rules |
+|-----|------|-------|
+| `upstream/main` | NousResearch upstream | Read-only. `https://github.com/NousResearch/hermes-agent.git`. |
+| `nicoechaniz/main` | Nico's fork main | Read-only reference. Carries Nico's canonical features. PRs target his branches, not main directly. |
+| `nousmain` | Local mirror of the chosen base | Must match `upstream/main` (or a specific upstream tag) exactly after each sync. Never commit directly. |
+| `integration/autoresearch-on-sync-<date>` | Fede's integration branch | `nousmain` + Nico's canonical features + Fede's features. This is what gets tagged and deployed. Rebuilt per sync, never the merge target of feature branches. |
+| `feat/*` / `fix/*` | Fede's canonical features/fixes | Each applies cleanly over the chosen base. Examples below. |
+| `feat/integration` | Legacy hand-built integration | Archive of the pre-2026-06 integrated work. Kept for history; not the deploy source anymore. |
+| `archive/*` / `backup/*` / `*-legacy` | Safety archives (often remote-only) | Do not merge. A branch fully present on `fede654` may be deleted locally — the remote is the archive. |
+| `canonical-<date>` (tag) | Release marker | Annotated tag on a validated integration commit. **This is what agents check out.** Immutable once announced. |
 
-Rebuild integration `main`:
+## Current canonical features
 
-```bash
-git checkout main
-git reset --hard nousmain
-git merge --no-ff feat/kimi
-git merge --no-ff feat/daemoncraft
-git merge --no-ff feat/minimax-defaults
-git merge --no-ff feat/kanban-review
-git merge --no-ff feat/altermundi-cli
-git merge --no-ff feat/altermundi-tui
-```
+Fede-originated (also flow upstream to Nico via PR):
 
-Run tests before pushing. Use the wrapper, never raw `pytest`:
+| Feature | Where it lives | Notes |
+|---------|----------------|-------|
+| autoresearch | `agent/research/`, `tools/research_tool.py`, `tools/research_job_tool.py` | Provider-neutral. Canonical source is Nico's `feat/autoresearch-core-v014`; Fede's `fix/autoresearch-core-flaws` carries the detached-job / fan-out / `inherit_profile` fixes (PR to Nico). |
+| metric-aware `/goal` | `hermes_cli/goals.py`, `hermes_cli/cli_commands_mixin.py`, `gateway/slash_commands.py` | Extends Nous's `/goal` (Ralph-style loop) with an optional `metric:` tail + deterministic verdict bypass. Wired into the relocated mixin handlers. |
 
-```bash
-scripts/run_tests.sh
-```
+Consumed from Nico (do not re-implement — they ride in via the base): `feat/kimi`,
+`feat/daemoncraft`, `feat/minimax-defaults`, `feat/kanban-review`,
+`feat/altermundi-cli`, `feat/altermundi-tui`, `feat/kimi-webbridge`.
 
-For provider-specific fixes, add an end-to-end smoke test when credentials are available. Example for Kimi OAuth:
+## Sync workflow (advancing to a new upstream)
 
-```bash
-hermes chat --provider kimi-coding -m kimi-k2.6 -q 'Say OK only.' -Q --yolo
-```
+1. Confirm remotes: `git remote -v` (expect `upstream`, `nicoechaniz`, `fede654`).
+2. Refresh the base mirror. Default base is `nicoechaniz/main` (inherits Nico's
+   features + his upstream sync). Use `upstream/main` directly only when racing
+   ahead of Nico — and then open the sync PR so he catches up:
+   ```bash
+   git fetch upstream nicoechaniz
+   git checkout nousmain && git reset --hard nicoechaniz/main   # or upstream/main
+   ```
+3. Rebuild the integration in a worktree (keeps the live install untouched):
+   ```bash
+   git worktree add -b integration/autoresearch-on-sync-<date> .worktrees/sync <base>
+   cd .worktrees/sync
+   git rebase --onto nousmain <old-base> <fede-feature-branch>   # e.g. autoresearch-core
+   # git auto-drops patch-duplicates; resolve conflicts where upstream
+   # extracted code (god-file refactors — authz_mixin, model_setup_flows,
+   # cli_commands_mixin). Take upstream's structure, graft the fork delta in.
+   ```
+4. Cherry-pick the standalone feature commits (e.g. metric-aware `/goal`) onto the
+   integration; resolve against the moved handlers.
+5. **Validate before tagging:**
+   ```bash
+   scripts/run_tests.sh   # or: pytest tests/agent/research tests/hermes_cli/test_goals.py ...
+   ```
+   Plus one **live** smoke — mocks hide signature drift (this is how the
+   `delegate_task(inherit_profile=)` break was found):
+   ```python
+   research_job(action='start', topic='Return 42', metric_key='correctness', max_iterations=1)
+   ```
 
-Push and deploy:
+## Release & multi-agent replication
 
-```bash
-git push origin main
-git -C ~/.hermes/hermes-agent fetch origin main
-git -C ~/.hermes/hermes-agent reset --hard origin/main
-```
+The integration is **not** deployed branch-by-branch. It is tagged once validated,
+and every agent checks out the same tag — code is identical across agents, only
+config differs.
 
-If the gateway is running and the change affects gateway/runtime behavior, restart the relevant service after deployment.
+1. Tag the validated commit:
+   ```bash
+   git tag -a canonical-<date> -m "Canonical stack — base, features, validation"
+   git push fede654 canonical-<date>
+   ```
+2. On each agent's checkout (`~/.hermes/hermes-agent`):
+   ```bash
+   git fetch fede654 --tags
+   git checkout -B local-canonical canonical-<date>
+   venv/bin/python -m pip install -e .          # sync deps to the new base
+   systemctl --user restart hermes-gateway.service
+   ```
+3. **Per-agent, never in git:** `~/.hermes/config.yaml` (`model.default` / `provider`
+   / `base_url`) and provider credentials (e.g. `~/.kimi/credentials/kimi-code.json`).
+   autoresearch is provider-neutral — each agent runs research with whatever
+   runtime/provider it has configured.
+4. Keep the previous integration branch as the rollback ref until the new tag is
+   confirmed healthy on every agent.
 
-## Rebirth sync coupling
+## Upstream collaboration (PRs to Nico)
 
-Fork sync and CompAII rebirth sync go together. After a meaningful Hermes fork sync or deploy, also run the rebirth sync from the CompAII state repository:
+Fede's work flows back up so the fork doesn't diverge silently:
 
-```bash
-python ~/Projects/compaii-state/sync.py
-```
+- **Sync** (`sync/upstream-<date>` → `nicoechaniz/main`): advances Nico's fork to a
+  newer upstream. Merge, not rebuild, matching his "Merge branch 'nousmain'" style.
+- **Fixes** (`fix/autoresearch-core-flaws` → `nicoechaniz/feat/autoresearch-core-v014`):
+  bugfixes to the shared autoresearch core go to his canonical branch, not into the
+  upstream-sync PR (different scope, different base).
 
 ## Verification checklist
 
-Before declaring a branch/workflow update complete:
+Before declaring a release done:
 
-1. `git remote -v` confirms `origin` and `upstream`.
-2. `git status --short --branch` is clean.
-3. Every canonical feature branch is either rebased onto `nousmain` or explicitly documented as pending rebase.
-4. `main` contains every canonical active branch.
-5. Superseded remote branches are deleted or clearly documented as archives.
-6. Tests relevant to the changed areas pass via `scripts/run_tests.sh`.
-7. Deployed checkout `~/.hermes/hermes-agent` matches `origin/main` when runtime behavior changed.
+1. `git remote -v` shows `upstream`, `nicoechaniz`, `fede654`.
+2. Working tree clean; no stray conflict markers (`git grep -nE '^(<{7}|>{7}) '`).
+3. Every Fede feature is rebased onto the new base or explicitly noted as pending.
+4. Focused tests green **and** one live `run_research` smoke on the target provider.
+5. `canonical-<date>` tag pushed to `fede654`.
+6. Every agent's `~/.hermes/hermes-agent` checked out at the tag; gateway restarted.
+7. Superseded local branches deleted (archive on `fede654` first if not already there).
