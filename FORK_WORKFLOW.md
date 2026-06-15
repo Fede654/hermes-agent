@@ -53,11 +53,11 @@ not a long-lived divergent fork. Everything below serves that:
 | `upstream/main` | NousResearch upstream | Read-only. `https://github.com/NousResearch/hermes-agent.git`. |
 | `nicoechaniz/main` | Nico's fork main | Read-only reference. Carries Nico's canonical features. PRs target his branches, not main directly. |
 | `nousmain` | Local mirror of the chosen base | Must match `upstream/main` (or a specific upstream tag) exactly after each sync. Never commit directly. |
-| `integration/autoresearch-on-sync-<date>` | Fede's integration branch | `nousmain` + Nico's canonical features + Fede's features. This is what gets tagged and deployed. Rebuilt per sync, never the merge target of feature branches. |
+| `integration/autoresearch-on-sync-<date>` | Build / staging branch | Where the integration is assembled + validated per sync (`nousmain` + Nico's features + Fede's features + carried fixes). Once green it is **promoted to `feat/integration`**. Rebuilt per sync, never the merge target of feature branches. |
 | `feat/*` / `fix/*` | Fede's canonical features/fixes | Each applies cleanly over the chosen base. Examples below. |
-| `feat/integration` | Legacy hand-built integration | Archive of the pre-2026-06 integrated work. Kept for history; not the deploy source anymore. |
+| `feat/integration` | **THE canonical integration — single deploy target** | What every deployed agent tracks (Chiwa's `/opt/chiwa/agent`, `~/.hermes/hermes-agent`, …). Force-updated each sync to the validated build. Provider-neutral; only per-agent config differs. The pre-2026-06 hand-built history under this name is **retired** — `canonical-<date>` tags hold immutable snapshots if you need the old states. |
 | `archive/*` / `backup/*` / `*-legacy` | Safety archives (often remote-only) | Do not merge. A branch fully present on `fede654` may be deleted locally — the remote is the archive. |
-| `canonical-<date>` (tag) | Release marker | Annotated tag on a validated integration commit. **This is what agents check out.** Immutable once announced. |
+| `canonical-<date>` (tag) | Immutable release pin | Annotated tag on a validated `feat/integration` state. **Optional**, for rollback / reproducibility. Agents track the `feat/integration` **branch**; pin to a tag only to freeze a specific build. |
 
 ## Current canonical features
 
@@ -105,21 +105,25 @@ Consumed from Nico (do not re-implement — they ride in via the base): `feat/ki
 
 ## Release & multi-agent replication
 
-The integration is **not** deployed branch-by-branch. It is tagged once validated,
-and every agent checks out the same tag — code is identical across agents, only
-config differs.
+Every deployed agent tracks **one stable branch: `feat/integration`** — the
+canonical integration. Code is identical across agents; only config differs. The
+dated `integration/autoresearch-on-sync-<date>` branch is just the staging area
+where the integration is assembled and validated; once green it is **promoted to
+`feat/integration`** and (optionally) tagged `canonical-<date>` as an immutable
+rollback pin.
 
-1. Tag the validated commit:
+1. Promote the validated build to the canonical branch (+ optional tag):
    ```bash
-   git tag -a canonical-<date> -m "Canonical stack — base, features, validation"
+   git push fede654 +<validated-build>:feat/integration   # force-update the canonical
+   git tag -a canonical-<date> -m "Canonical stack — base, features, validation"  # optional pin
    git push fede654 canonical-<date>
    ```
-2. On each agent's checkout (`~/.hermes/hermes-agent`):
+2. On each agent's checkout (`~/.hermes/hermes-agent`, Chiwa's `/opt/chiwa/agent`):
    ```bash
-   git fetch fede654 --tags
-   git checkout -B local-canonical canonical-<date>
-   venv/bin/python -m pip install -e .          # sync deps to the new base
-   systemctl --user restart hermes-gateway.service
+   git fetch fede654
+   git checkout -B feat/integration fede654/feat/integration
+   .venv/bin/python -m pip install -e .          # sync deps to the new base
+   # restart the agent's gateway (per-agent service, e.g. hermes-gateway-chiwa)
    ```
 3. **Per-agent, never in git:** `~/.hermes/config.yaml` (`model.default` / `provider`
    / `base_url`) and provider credentials (e.g. `~/.kimi/credentials/kimi-code.json`).
