@@ -61,6 +61,10 @@ class ExperimentResult:
     tokens_in: int = 0
     tokens_out: int = 0
     cost_usd: float = 0.0
+    # Actual on-disk dir the worker ran in. Fan-out branches use a
+    # ``…-branch{i}`` suffix that can't be reconstructed from run_id+iteration
+    # alone, so artifact reads / snapshots rely on this when present.
+    working_dir: str = ""
 
 
 @dataclass
@@ -171,7 +175,7 @@ class ExperimentRunner:
         t0 = _time.monotonic()
         round_dir = str(self.workspace / f"round-{run_id}-iter{iteration}")
         goal = (
-            f"You are a Hermes research worker. Read program.md in {round_dir} "
+            f"You are a Hermes research worker. Read task_brief.md in {round_dir} "
             f"and run the experiment. Report your result as:\n"
             f"METRIC: {self.config.metric_key}=<value> STATUS: improved|regressed|neutral "
             f"NOTES: <one line summary>"
@@ -228,6 +232,7 @@ class ExperimentRunner:
             tokens_in=sandbox_result.tokens_in,
             tokens_out=sandbox_result.tokens_out,
             cost_usd=sandbox_result.cost_usd,
+            working_dir=round_dir,
         )
 
         if kept:
@@ -409,6 +414,7 @@ def _result_from_dict(data: dict[str, object]) -> ExperimentResult | None:
     _tokens_in = data.get("tokens_in", 0)
     _tokens_out = data.get("tokens_out", 0)
     _cost_usd = data.get("cost_usd", 0.0)
+    _working_dir = data.get("working_dir", "")
     return ExperimentResult(
         run_id=run_id,
         iteration=iteration,
@@ -426,4 +432,5 @@ def _result_from_dict(data: dict[str, object]) -> ExperimentResult | None:
         tokens_in=int(_tokens_in) if isinstance(_tokens_in, (int, float)) else 0,
         tokens_out=int(_tokens_out) if isinstance(_tokens_out, (int, float)) else 0,
         cost_usd=float(_cost_usd) if isinstance(_cost_usd, (int, float)) else 0.0,
+        working_dir=_working_dir if isinstance(_working_dir, str) else "",
     )
