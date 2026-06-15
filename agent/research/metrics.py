@@ -185,7 +185,10 @@ class UniversalMetricParser:
                             for metric_name, val in metrics.items():
                                 if isinstance(val, (int, float)) and math.isfinite(val):
                                     result.scalars[f"{cond_name}/{metric_name}"] = float(val)
-                                    result.scalars[metric_name] = float(val)
+                                    # Don't let a later condition silently clobber the
+                                    # unqualified key — first writer wins, deterministically.
+                                    # The qualified ``cond/metric`` keys disambiguate.
+                                    result.scalars.setdefault(metric_name, float(val))
                         elif isinstance(metrics, (int, float)) and math.isfinite(metrics):
                             result.scalars[f"{cond_name}/{seed_key}"] = float(metrics)
 

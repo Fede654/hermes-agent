@@ -57,7 +57,7 @@ class StubSink:
     """
 
     def run_started(self, spec: Any, run_id: str) -> None:
-        topic = getattr(spec, "topic", "")[:60]
+        topic = (getattr(spec, "topic", "") or "")[:60]
         logger.info("[sink-stub] run_started run_id=%s topic=%s", run_id, topic)
 
     def iteration_observed(
@@ -157,7 +157,7 @@ class KanbanSink:
                 pass
 
     def run_started(self, spec: Any, run_id: str) -> None:
-        topic = getattr(spec, "topic", "")[:80]
+        topic = (getattr(spec, "topic", "") or "")[:80]
         task_type = getattr(spec, "task_type", "?")
         metric = getattr(spec, "metric_key", "?")
         self._comment(
