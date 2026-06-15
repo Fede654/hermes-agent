@@ -399,7 +399,6 @@ def _call_delegate_task(
         context=context,
         toolsets=toolsets or ["terminal", "file"],
         parent_agent=parent_agent,
-        inherit_profile=True,
     )
     try:
         return json.loads(raw)
@@ -423,7 +422,6 @@ def _call_delegate_task_batch(
         tasks=tasks,
         toolsets=toolsets or ["terminal", "file"],
         parent_agent=parent_agent,
-        inherit_profile=True,
     )
     try:
         return json.loads(raw)
