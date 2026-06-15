@@ -71,6 +71,12 @@ try {
 const PAIR_ONLY = args.includes('--pair-only');
 const WHATSAPP_MODE = getArg('mode', process.env.WHATSAPP_MODE || 'self-chat'); // "bot" or "self-chat"
 const ALLOWED_USERS = parseAllowedUsers(process.env.WHATSAPP_ALLOWED_USERS || '');
+const IGNORED_CHATS = new Set(
+  (process.env.WHATSAPP_IGNORED_CHATS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+);
 const DEFAULT_REPLY_PREFIX = '⚕ *Hermes Agent*\n────────────\n';
 const REPLY_PREFIX = process.env.WHATSAPP_REPLY_PREFIX === undefined
   ? DEFAULT_REPLY_PREFIX
@@ -279,6 +285,17 @@ async function startSocket() {
             messageKeys: Object.keys(msg.message || {}),
           }));
         } catch {}
+      }
+      if (IGNORED_CHATS.has(chatId)) {
+        try {
+          console.log(JSON.stringify({
+            event: 'ignored',
+            reason: 'ignored_chat',
+            chatId,
+            senderId: msg.key.participant || chatId,
+          }));
+        } catch {}
+        continue;
       }
       const senderId = msg.key.participant || chatId;
       const isGroup = chatId.endsWith('@g.us');
