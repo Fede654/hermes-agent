@@ -1347,6 +1347,41 @@ class AIAgent:
             return True
         return bool(self.base_url and is_local_endpoint(self.base_url))
 
+    def _has_truncated_tool_call_args(self, assistant_message) -> bool:
+        """Detect a tool call whose JSON arguments were cut off mid-generation
+        (e.g. kimi-coding emitting an opening brace then stopping while
+        under-reporting finish_reason as 'stop'/'tool_calls'). Returning True
+        lets the caller upgrade finish_reason to 'length' so the existing
+        truncated-tool-call retry/boost path recovers instead of silently
+        sanitizing the args to an empty object and looping on an empty tool
+        call. Conservative: only fires when args start as a JSON object/array
+        but fail to parse."""
+        if self.api_mode != "chat_completions":
+            return False
+        tool_calls = getattr(assistant_message, "tool_calls", None)
+        if not tool_calls:
+            return False
+        import json as _json
+        for tc in tool_calls:
+            fn = getattr(tc, "function", None)
+            if fn is None and isinstance(tc, dict):
+                fn = tc.get("function")
+            if fn is None:
+                continue
+            args = getattr(fn, "arguments", None)
+            if args is None and isinstance(fn, dict):
+                args = fn.get("arguments")
+            if not isinstance(args, str):
+                continue
+            stripped = args.strip()
+            if not stripped or stripped[0] not in "{[":
+                continue
+            try:
+                _json.loads(stripped)
+            except (ValueError, TypeError):
+                return True
+        return False
+
     def _should_treat_stop_as_truncated(
         self,
         finish_reason: str,
