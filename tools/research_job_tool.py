@@ -166,9 +166,13 @@ RESEARCH_JOB_SCHEMA = {
 def _action_start(args: dict[str, Any]) -> str:
     job_id = args.get("job_id") or secrets.token_hex(8)
     cfg = _load_config_for_job()
+    job_dir = _job_dir(job_id)
 
     spec = {
         "job_id": job_id,
+        # job_runner derives all paths from job_dir; it MUST be in the spec it
+        # reads back, otherwise main()/_child_main crash with KeyError.
+        "job_dir": str(job_dir),
         "topic": args.get("topic", ""),
         "deliverable": args.get("deliverable", ""),
         "metric_key": args.get("metric_key", ""),
@@ -186,7 +190,15 @@ def _action_start(args: dict[str, Any]) -> str:
     }
     spec.update(cfg)
     spec_path = _write_job_spec(job_id, spec)
-    job_dir = _job_dir(job_id)
+
+    # Write the initial state BEFORE spawning so the runner's own "running"
+    # write (with the real runner/child PIDs) lands after and wins the race.
+    (job_dir / "state.json").write_text(json.dumps({
+        "job_id": job_id,
+        "status": "queued",
+        "job_dir": str(job_dir),
+        "spec_path": str(spec_path),
+    }, indent=2))
 
     hermes_root = get_hermes_home() / "hermes-agent"
     python_bin = hermes_root / "venv" / "bin" / "python"
@@ -209,15 +221,17 @@ def _action_start(args: dict[str, Any]) -> str:
     )
     proc = json.loads(raw) if isinstance(raw, str) else raw
 
-    state = {
-        "job_id": job_id,
-        "status": "queued",
-        "process_session_id": proc.get("session_id"),
-        "pid": proc.get("pid"),
-        "job_dir": str(job_dir),
-        "spec_path": str(spec_path),
-    }
-    (job_dir / "state.json").write_text(json.dumps(state, indent=2))
+    # Record the launcher's background session id, but do NOT downgrade a job
+    # the runner may have already flipped to "running".
+    try:
+        live = json.loads((job_dir / "state.json").read_text())
+    except Exception:
+        live = {"job_id": job_id, "status": "queued", "job_dir": str(job_dir)}
+    if live.get("status") in (None, "queued"):
+        live["process_session_id"] = proc.get("session_id")
+        live["pid"] = proc.get("pid")
+        live["spec_path"] = str(spec_path)
+        (job_dir / "state.json").write_text(json.dumps(live, indent=2))
 
     return json.dumps({
         "ok": True,
@@ -319,10 +333,15 @@ def _action_resume(args: dict[str, Any]) -> str:
         return json.dumps({"ok": False, "error": f"Job {job_id} not found"}, indent=2)
 
     state = json.loads(state_path.read_text())
-    if state.get("status") not in ("interrupted", "failed"):
+    # The runner writes terminal statuses "timeout"/"stale"/"failed"; a crashed
+    # launcher may leave "interrupted". All of these are the crash-recovery
+    # cases resume exists for. ("queued"/"running"/"completed" are not.)
+    resumable = ("interrupted", "failed", "timeout", "stale")
+    if state.get("status") not in resumable:
         return json.dumps({
             "ok": False,
-            "error": f"Cannot resume job in status '{state.get('status')}'. Only interrupted or failed jobs can be resumed."
+            "error": f"Cannot resume job in status '{state.get('status')}'. "
+                     f"Resumable statuses: {', '.join(resumable)}."
         }, indent=2)
 
     # Mark as resuming and re-launch

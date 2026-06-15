@@ -37,8 +37,16 @@ def build_agent_for_research_job(spec: dict[str, Any]) -> Any:
     """
     from run_agent import AIAgent
 
+    model = spec.get("model")
+    if not model:
+        raise ValueError(
+            "Research job spec has no 'model'. Set delegation.model or model.default "
+            "in the Hermes config so detached jobs can resolve a provider/model "
+            "(the job inherits the main runtime — no hardcoded provider)."
+        )
+
     agent = AIAgent(
-        model=spec["model"],
+        model=model,
         provider=spec.get("provider"),
         base_url=spec.get("base_url"),
         api_key=spec.get("api_key"),
