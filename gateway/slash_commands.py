@@ -1603,9 +1603,15 @@ class GatewaySlashCommandsMixin:
                 logger.debug("goal clear: pending continuation cleanup failed: %s", exc)
             return t("gateway.goal_cleared") if had else t("gateway.no_active_goal")
 
-        # Otherwise — treat the remaining text as the new goal.
+        # Otherwise — treat the remaining text as the new goal. Parse an
+        # optional trailing metric criterion ("..., pass_rate >= 0.9") so the
+        # judge can short-circuit deterministically (Phase B — metric-aware).
+        from hermes_cli.goals import _split_goal_text_and_criterion
+        _text, _metric_key, _criterion = _split_goal_text_and_criterion(args)
         try:
-            state = mgr.set(args)
+            state = mgr.set(
+                _text, metric_key=_metric_key, acceptance_criterion=_criterion
+            )
         except ValueError as exc:
             return t("gateway.goal.invalid", error=str(exc))
 
