@@ -1018,11 +1018,21 @@ def _generate_openai_tts(text: str, output_path: str, tts_config: Dict[str, Any]
     base_url = oai_config.get("base_url", base_url)
     speed = float(oai_config.get("speed", tts_config.get("speed", 1.0)))
 
-    # Determine response format from extension
-    if output_path.endswith(".ogg"):
+    # Determine response format. Custom OpenAI-compatible servers (e.g. local
+    # speaches/Kokoro) reject 'opus' (only mp3/wav/flac/pcm), so for a voice
+    # bubble (.ogg) on a non-OpenAI endpoint we synth mp3 then transcode to
+    # Opus via ffmpeg. Canonical api.openai.com supports opus natively → direct.
+    _want_opus = output_path.endswith(".ogg")
+    _custom_endpoint = bool(base_url) and "api.openai.com" not in base_url
+    if _want_opus and _custom_endpoint:
+        response_format = "mp3"
+        _synth_path = output_path[:-4] + ".mp3"
+    elif _want_opus:
         response_format = "opus"
+        _synth_path = output_path
     else:
         response_format = "mp3"
+        _synth_path = output_path
 
     OpenAIClient = _import_openai_client()
     client = OpenAIClient(api_key=api_key, base_url=base_url)
@@ -1038,7 +1048,22 @@ def _generate_openai_tts(text: str, output_path: str, tts_config: Dict[str, Any]
             create_kwargs["speed"] = max(0.25, min(4.0, speed))
         response = client.audio.speech.create(**create_kwargs)
 
-        response.stream_to_file(output_path)
+        response.stream_to_file(_synth_path)
+        if _want_opus and _custom_endpoint:
+            _ogg = _convert_to_opus(_synth_path)
+            if _ogg:
+                if _synth_path != output_path and os.path.exists(_synth_path):
+                    try:
+                        os.remove(_synth_path)
+                    except Exception:
+                        pass
+                return output_path
+            # ffmpeg unavailable/failed — leave the mp3 at the expected path
+            try:
+                if _synth_path != output_path:
+                    os.replace(_synth_path, output_path)
+            except Exception:
+                pass
         return output_path
     finally:
         close = getattr(client, "close", None)
@@ -2019,6 +2044,7 @@ def text_to_speech_tool(
     text: str,
     output_path: Optional[str] = None,
     voice: Optional[str] = None,
+    speed: Optional[float] = None,
 ) -> str:
     """
     Convert text to speech audio.
@@ -2045,17 +2071,28 @@ def text_to_speech_tool(
     # top-level and active-provider voice for THIS synthesis only — enables
     # per-message multilingual voice selection (e.g. local Kokoro). A shallow
     # copy keeps the cached config untouched.
-    if isinstance(voice, str) and voice.strip():
-        _v = voice.strip()
+    if (isinstance(voice, str) and voice.strip()) or speed is not None:
         tts_config = dict(tts_config)
-        tts_config["voice"] = _v
         try:
             _prov = _get_provider(tts_config)
-            if isinstance(tts_config.get(_prov), dict):
-                _sec = dict(tts_config[_prov]); _sec["voice"] = _v
-                tts_config[_prov] = _sec
         except Exception:
-            pass
+            _prov = None
+        _sec = dict(tts_config[_prov]) if isinstance(tts_config.get(_prov), dict) else None
+        if isinstance(voice, str) and voice.strip():
+            _v = voice.strip()
+            tts_config["voice"] = _v
+            if _sec is not None:
+                _sec["voice"] = _v
+        if speed is not None:
+            try:
+                _sp = max(0.25, min(4.0, float(speed)))
+                tts_config["speed"] = _sp
+                if _sec is not None:
+                    _sec["speed"] = _sp
+            except (TypeError, ValueError):
+                pass
+        if _sec is not None and _prov:
+            tts_config[_prov] = _sec
     provider = _get_provider(tts_config)
 
     # User-declared command provider (type: command under tts.providers.<name>)
@@ -2733,6 +2770,10 @@ TTS_SCHEMA = {
             "voice": {
                 "type": "string",
                 "description": "Optional Kokoro voice for THIS message (local multilingual TTS). Pick by language: Spanish em_alex/em_santa(m), ef_dora(f); English-UK bm_lewis/bm_george/bm_daniel/bm_fable(m), bf_emma/bf_alice/bf_isabella/bf_lily(f); English-US am_adam/am_michael/am_onyx(m), af_heart/af_bella/af_nova/af_sarah(f); Portuguese pm_alex/pm_santa(m), pf_dora(f); French ff_siwis(f); Italian im_nicola(m)/if_sara(f); Hindi hm_omega/hm_psi(m), hf_alpha/hf_beta(f); Japanese jm_kumo(m)/jf_alpha(f); Chinese zm_yunxi/zm_yunyang(m), zf_xiaoxiao/zf_xiaoni(f). Omit to use the configured default (em_alex, Spanish male). Always match the voice's language to the language of the text."
+            },
+            "speed": {
+                "type": "number",
+                "description": "Optional speaking rate for THIS message, 0.25-4.0 (1.0 = normal). <1 slower (emphasis/clarity), >1 faster (long content). Omit for normal speed."
             }
         },
         "required": ["text"]
@@ -2746,7 +2787,8 @@ registry.register(
     handler=lambda args, **kw: text_to_speech_tool(
         text=args.get("text", ""),
         output_path=args.get("output_path"),
-        voice=args.get("voice")),
+        voice=args.get("voice"),
+        speed=args.get("speed")),
     check_fn=check_tts_requirements,
     emoji="🔊",
 )
