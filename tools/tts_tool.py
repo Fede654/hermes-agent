@@ -2018,6 +2018,7 @@ def _generate_kittentts(text: str, output_path: str, tts_config: Dict[str, Any])
 def text_to_speech_tool(
     text: str,
     output_path: Optional[str] = None,
+    voice: Optional[str] = None,
 ) -> str:
     """
     Convert text to speech audio.
@@ -2040,6 +2041,21 @@ def text_to_speech_tool(
         return tool_error("Text is required", success=False)
 
     tts_config = _load_tts_config()
+    # Per-call voice override (model-selected). When provided, override the
+    # top-level and active-provider voice for THIS synthesis only — enables
+    # per-message multilingual voice selection (e.g. local Kokoro). A shallow
+    # copy keeps the cached config untouched.
+    if isinstance(voice, str) and voice.strip():
+        _v = voice.strip()
+        tts_config = dict(tts_config)
+        tts_config["voice"] = _v
+        try:
+            _prov = _get_provider(tts_config)
+            if isinstance(tts_config.get(_prov), dict):
+                _sec = dict(tts_config[_prov]); _sec["voice"] = _v
+                tts_config[_prov] = _sec
+        except Exception:
+            pass
     provider = _get_provider(tts_config)
 
     # User-declared command provider (type: command under tts.providers.<name>)
@@ -2702,7 +2718,7 @@ from tools.registry import registry, tool_error
 
 TTS_SCHEMA = {
     "name": "text_to_speech",
-    "description": "Convert text to speech audio. Returns a MEDIA: path that the platform delivers as native audio. Compatible providers render as a voice bubble on Telegram; otherwise audio is sent as a regular attachment. In CLI mode, saves to ~/voice-memos/. Voice and provider are user-configured (built-in providers like edge/openai or custom command providers under tts.providers.<name>), not model-selected.",
+    "description": "Convert text to speech audio. Returns a MEDIA: path that the platform delivers as native audio (voice bubble on Telegram/WhatsApp). In CLI mode, saves to ~/voice-memos/. The provider is user-configured; this deployment uses a LOCAL multilingual Kokoro server. You MAY pass `voice` to pick a voice for THIS message — match it to the language you are speaking.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -2713,6 +2729,10 @@ TTS_SCHEMA = {
             "output_path": {
                 "type": "string",
                 "description": f"Optional custom file path to save the audio. Defaults to {display_hermes_home()}/audio_cache/<timestamp>.mp3"
+            },
+            "voice": {
+                "type": "string",
+                "description": "Optional Kokoro voice for THIS message (local multilingual TTS). Pick by language: Spanish em_alex/em_santa(m), ef_dora(f); English-UK bm_lewis/bm_george/bm_daniel/bm_fable(m), bf_emma/bf_alice/bf_isabella/bf_lily(f); English-US am_adam/am_michael/am_onyx(m), af_heart/af_bella/af_nova/af_sarah(f); Portuguese pm_alex/pm_santa(m), pf_dora(f); French ff_siwis(f); Italian im_nicola(m)/if_sara(f); Hindi hm_omega/hm_psi(m), hf_alpha/hf_beta(f); Japanese jm_kumo(m)/jf_alpha(f); Chinese zm_yunxi/zm_yunyang(m), zf_xiaoxiao/zf_xiaoni(f). Omit to use the configured default (em_alex, Spanish male). Always match the voice's language to the language of the text."
             }
         },
         "required": ["text"]
@@ -2725,7 +2745,8 @@ registry.register(
     schema=TTS_SCHEMA,
     handler=lambda args, **kw: text_to_speech_tool(
         text=args.get("text", ""),
-        output_path=args.get("output_path")),
+        output_path=args.get("output_path"),
+        voice=args.get("voice")),
     check_fn=check_tts_requirements,
     emoji="🔊",
 )
