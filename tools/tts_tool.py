@@ -1020,13 +1020,16 @@ def _generate_openai_tts(text: str, output_path: str, tts_config: Dict[str, Any]
 
     # Determine response format. Custom OpenAI-compatible servers (e.g. local
     # speaches/Kokoro) reject 'opus' (only mp3/wav/flac/pcm), so for a voice
-    # bubble (.ogg) on a non-OpenAI endpoint we synth mp3 then transcode to
-    # Opus via ffmpeg. Canonical api.openai.com supports opus natively → direct.
+    # bubble (.ogg) on a non-OpenAI endpoint we fetch a LOSSLESS WAV and
+    # transcode to Opus via ffmpeg — making Opus the only lossy step. (mp3 as
+    # the intermediate would be double-lossy: server-side mp3 encode + opus
+    # encode = two generations of compression artifacts.) Canonical
+    # api.openai.com supports opus natively → request it direct.
     _want_opus = output_path.endswith(".ogg")
     _custom_endpoint = bool(base_url) and "api.openai.com" not in base_url
     if _want_opus and _custom_endpoint:
-        response_format = "mp3"
-        _synth_path = output_path[:-4] + ".mp3"
+        response_format = "wav"
+        _synth_path = output_path[:-4] + ".wav"
     elif _want_opus:
         response_format = "opus"
         _synth_path = output_path
