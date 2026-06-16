@@ -1197,14 +1197,26 @@ def _maybe_wrap_anthropic(
     except ImportError:
         pass
 
-    # Explicit non-anthropic api_mode wins over URL heuristics.
+    # Explicit non-anthropic api_mode normally wins over URL heuristics — but
+    # NOT for endpoints that only speak Anthropic Messages. api.kimi.com/coding
+    # (and /anthropic, api.anthropic.com) have no usable OpenAI chat.completions
+    # surface: with the raw /coding base (no /v1) the SDK posts to
+    # /coding/chat/completions -> 404 resource_not_found. A stale/raced
+    # api_mode=chat_completions inherited from the main runtime must NOT force
+    # that dead wire, so force the Anthropic wrap for these endpoints (the
+    # Anthropic client works with both /coding and /coding/v1 bases — verified).
+    endpoint_is_anthropic = _endpoint_speaks_anthropic_messages(base_url)
     if api_mode and api_mode != "anthropic_messages":
-        return client_obj
+        if not endpoint_is_anthropic:
+            return client_obj
+        logger.warning(
+            "Auxiliary client: %s speaks Anthropic Messages but api_mode=%r was "
+            "requested; forcing the Anthropic wire (OpenAI chat.completions 404s "
+            "on this endpoint).",
+            base_url, api_mode,
+        )
 
-    should_wrap = (
-        api_mode == "anthropic_messages"
-        or _endpoint_speaks_anthropic_messages(base_url)
-    )
+    should_wrap = (api_mode == "anthropic_messages") or endpoint_is_anthropic
     if not should_wrap:
         return client_obj
 
