@@ -416,7 +416,10 @@ class TestMemoryToolDispatcher:
     def test_no_store_returns_error(self):
         result = json.loads(memory_tool(action="add", content="test"))
         assert result["success"] is False
-        assert "not available" in result["error"]
+        # Native store retired (2026-06-15): the error points the model at HMK's
+        # remember/recall instead of telling it to retry the memory tool.
+        assert "remember" in result["error"]
+        assert "retry" in result["error"].lower()
 
     def test_invalid_target(self, store):
         result = json.loads(memory_tool(action="add", target="invalid", content="x", store=store))
