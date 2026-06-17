@@ -258,6 +258,30 @@ FALLBACK_MAX_TEXT_LENGTH = 4000
 # Back-compat alias. Prefer ``_resolve_max_text_length()`` for new code.
 MAX_TEXT_LENGTH = FALLBACK_MAX_TEXT_LENGTH
 
+# The "openai" cap (4096) is the api.openai.com per-request limit. When the
+# OpenAI-compatible provider is pointed at a self-hosted endpoint (speaches/
+# Kokoro, LiteLLM, vLLM, ...), that limit does not apply, and capping at 4096
+# silently truncates long input (e.g. a full chapter -> ~27s of audio). Use a
+# generous cap for custom endpoints; an explicit
+# ``tts.openai.max_text_length`` override still wins.
+SELF_HOSTED_OPENAI_MAX_TEXT_LENGTH = 100000
+
+
+def _openai_endpoint_is_self_hosted(prov_cfg: Optional[Dict[str, Any]]) -> bool:
+    """True when the OpenAI-compatible TTS provider targets a non-OpenAI host.
+
+    A configured ``tts.openai.base_url`` (or the ``OPENAI_BASE_URL`` env var)
+    pointing anywhere other than ``api.openai.com`` means a self-hosted /
+    OpenAI-compatible server, which does not enforce the 4096-char limit.
+    Mirrors the ``_custom_endpoint`` check in the synthesis path.
+    """
+    base_url = ""
+    if isinstance(prov_cfg, dict):
+        base_url = str(prov_cfg.get("base_url") or "").strip()
+    if not base_url:
+        base_url = (get_env_value("OPENAI_BASE_URL") or "").strip()
+    return bool(base_url) and "api.openai.com" not in base_url
+
 
 def _resolve_max_text_length(
     provider: Optional[str],
@@ -299,6 +323,11 @@ def _resolve_max_text_length(
             return mapped
 
     if key in PROVIDER_MAX_TEXT_LENGTH:
+        # The OpenAI 4096 cap only applies to api.openai.com. A self-hosted
+        # OpenAI-compatible TTS server (speaches/Kokoro et al.) has no such
+        # limit, so don't truncate against it.
+        if key == "openai" and _openai_endpoint_is_self_hosted(prov_cfg):
+            return SELF_HOSTED_OPENAI_MAX_TEXT_LENGTH
         return PROVIDER_MAX_TEXT_LENGTH[key]
 
     # User-declared command provider (under tts.providers.<name>)
