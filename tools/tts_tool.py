@@ -2164,6 +2164,19 @@ def text_to_speech_tool(
         else:
             file_path = out_dir / f"tts_{timestamp}.mp3"
 
+    # Telegram: always deliver Opus voice bubbles. Coerce any non-.ogg path to
+    # .ogg for opus-capable built-in providers so even an explicit output_path
+    # like "chapter.mp3" becomes a voice bubble (the openai/Kokoro path then
+    # synthesizes lossless WAV and transcodes to Opus). Command providers keep
+    # their configured format.
+    if (
+        want_opus
+        and command_provider_config is None
+        and provider in {"openai", "elevenlabs", "mistral", "gemini"}
+        and file_path.suffix.lower() != ".ogg"
+    ):
+        file_path = file_path.with_suffix(".ogg")
+
     # Ensure parent directory exists
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_str = str(file_path)
