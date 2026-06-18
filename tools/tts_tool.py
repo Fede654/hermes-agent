@@ -2078,6 +2078,44 @@ def _generate_kittentts(text: str, output_path: str, tts_config: Dict[str, Any])
 # ===========================================================================
 # Main tool function
 # ===========================================================================
+
+# Long readings get a slightly slower default pace for intelligibility (the
+# caller can always pass an explicit speed to override).
+LONG_READING_CHARS = 3000
+LONG_READING_SPEED = 0.9
+
+_TTS_TERMINAL_PUNCT = (".", "!", "?", "…", ":", ";", "»", '"', "'", ")", "]")
+_MD_HEADING_MARKER = re.compile(r"(?m)^\s{0,3}#{1,6}\s+")
+
+
+def _normalize_tts_text(text: str) -> str:
+    """Make text pause correctly in TTS without book-specific heuristics.
+
+    Kokoro (and most TTS) only pause/close intonation on terminal punctuation,
+    so a title/heading sitting on its own paragraph WITHOUT punctuation gets run
+    into the next sentence. The single, universal structural signal in plain
+    text is the blank-line paragraph break, so we honor exactly that: every
+    blank-line-separated block that doesn't already end in terminal punctuation
+    is closed with a period. We also strip Markdown heading markers (``#`` is
+    markup, not content). This is deliberately NOT heading/number detection —
+    no assumptions about length, numbering, or language. Non-destructive: only
+    appends punctuation and removes ``#`` markers. (Real structural handling —
+    proper heading/section treatment — belongs upstream at ingestion time.)
+    """
+    if not text or "\n\n" not in text:
+        return text
+    blocks = re.split(r"\n\s*\n", text)
+    out = []
+    for block in blocks:
+        b = _MD_HEADING_MARKER.sub("", block).rstrip()
+        if not b.strip():
+            continue
+        if not b.endswith(_TTS_TERMINAL_PUNCT):
+            b = b + "."
+        out.append(b)
+    return "\n\n".join(out)
+
+
 def text_to_speech_tool(
     text: str,
     output_path: Optional[str] = None,
@@ -2103,6 +2141,12 @@ def text_to_speech_tool(
     """
     if not text or not text.strip():
         return tool_error("Text is required", success=False)
+
+    # Honor paragraph structure so titles/sections pause instead of running on.
+    text = _normalize_tts_text(text)
+    # Long readings default to a slightly slower pace (caller's explicit speed wins).
+    if speed is None and len(text) > LONG_READING_CHARS:
+        speed = LONG_READING_SPEED
 
     tts_config = _load_tts_config()
     # Per-call voice override (model-selected). When provided, override the
