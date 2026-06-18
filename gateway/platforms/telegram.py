@@ -4273,7 +4273,22 @@ class TelegramAdapter(BasePlatformAdapter):
         try:
             if not os.path.exists(audio_path):
                 return SendResult(success=False, error=self._missing_media_path_error("Audio", audio_path))
-            
+
+            # PTB's per-call write_timeout defaults to ~20s for media uploads and
+            # OVERRIDES the HTTPXRequest transport timeout, so a long voice
+            # (a full chapter = several MB / 15 min) times out mid-upload and
+            # falls back to text. Pass the configured upload timeouts explicitly.
+            def _mt(_name: str, _d: float) -> float:
+                try:
+                    return float(os.getenv(_name, str(_d)))
+                except (TypeError, ValueError):
+                    return _d
+            _media_timeouts = {
+                "write_timeout": _mt("HERMES_TELEGRAM_HTTP_WRITE_TIMEOUT", 180.0),
+                "read_timeout": _mt("HERMES_TELEGRAM_HTTP_READ_TIMEOUT", 120.0),
+                "connect_timeout": _mt("HERMES_TELEGRAM_HTTP_CONNECT_TIMEOUT", 10.0),
+            }
+
             with open(audio_path, "rb") as audio_file:
                 ext = os.path.splitext(audio_path)[1].lower()
                 # .ogg / .opus files -> send as voice (round playable bubble)
@@ -4296,6 +4311,7 @@ class TelegramAdapter(BasePlatformAdapter):
                             "reply_to_message_id": reply_to_id,
                             **voice_thread_kwargs,
                             **self._notification_kwargs(metadata),
+                            **_media_timeouts,
                         },
                         metadata,
                         reply_to_id,
@@ -4322,6 +4338,7 @@ class TelegramAdapter(BasePlatformAdapter):
                             "reply_to_message_id": reply_to_id,
                             **audio_thread_kwargs,
                             **self._notification_kwargs(metadata),
+                            **_media_timeouts,
                         },
                         metadata,
                         reply_to_id,
