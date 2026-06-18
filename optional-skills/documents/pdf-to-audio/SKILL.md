@@ -1,7 +1,7 @@
 ---
 name: pdf-to-audio
-description: "Narrate a PDF / book chapter to audio (optionally translated), the FULL text not a fragment. Covers reliable PDF extraction (PyMuPDF, all pages), per-language Kokoro voice, and Telegram Opus voice bubbles. Reads from the Research Library corpus when the book is already acquired."
-version: 1.1.0
+description: "Dictate/narrate text or a PDF/book chapter to audio (optionally translated), the FULL text. ONE step: call the text_to_speech tool with the whole text — it generates AND delivers the voice bubble automatically. No direct API, no send_message, no chunking, no ffmpeg."
+version: 1.2.0
 author: Chiwa
 metadata:
   hermes:
@@ -9,54 +9,33 @@ metadata:
     related_skills: [library-acquisition]
 ---
 
-# PDF / chapter → audio (full text, optionally translated)
+# Dictate text / a chapter to audio
 
-## When to use
-The user uploads a PDF (or points to one) and asks to translate and/or narrate
-it to audio. The failure mode this prevents: voicing only a FRAGMENT of the
-chapter because the PDF text was never fully extracted.
+## The ONE correct path (trust the tool — no workarounds)
 
-## Steps
+1. **Get the full text.**
+   - Plain text / a message: use it as-is.
+   - Already in the Research Library: read the chapter `.txt` from `$LIBRARY_ROOT/topics/**/books/*/chapters/`.
+   - A PDF: extract ALL of it with the consolidated extractor (PyMuPDF; `execute_code`'s sandbox lacks it, so use the `terminal` tool):
+     ```
+     ./scripts/hmk library_extract.py dump "<pdf-path>" --out /tmp/chapter.txt
+     ```
+     Confirm `chars=` matches a full chapter (15k–40k typical); a tiny count means a bad extraction — re-extract, don't ship a fragment.
 
-0. **If the book is already in the Research Library, read the chapter, don't
-   re-extract.** Check `$LIBRARY_ROOT/topics/**/books/*/meta.json`; if present,
-   read the chapter `.txt` from `chapters/` directly. (Acquire new books with the
-   `library-acquisition` skill.)
+2. **Translate if asked** — the WHOLE text, preserving paragraphs (not a summary).
 
-1. **Otherwise extract the FULL text — do NOT use `read_file` (it can't parse
-   PDFs) and do NOT `import fitz` inside `execute_code` (its sandbox lacks
-   PyMuPDF).** Use the `terminal` tool with the consolidated extractor in `dump`
-   mode, via a python that has PyMuPDF:
+3. **Speak it — ONE call to `text_to_speech` with the FULL text:**
    ```
-   ./scripts/hmk library_extract.py dump "<pdf-path>" --out /tmp/chapter.txt
+   text_to_speech(text="<entire chapter>", voice="<voice for the language>")
    ```
-   It prints `pages=N chars=M` to stderr — **confirm M matches a full chapter**
-   (a chapter is usually 15k–40k chars; a few-hundred/thousand means you only got
-   a fragment — investigate before continuing). Uploaded PDFs live under
-   `hermes-home/cache/documents/`.
+   - The local Kokoro server has **no length limit** — pass the whole chapter; it is **not truncated**.
+   - The tool returns a `MEDIA:` voice tag that the gateway **delivers to the chat automatically** as a voice bubble. You are done.
+   - Voice by language: ES `em_alex`/`ef_dora`, EN-UK `bm_lewis`, EN-US `am_adam`, PT `pm_alex`, IT `im_nicola`, FR `ff_siwis`, … (see the tool's `voice` catalogue).
 
-2. **Translate** (if asked) with the model — translate the WHOLE extracted text,
-   not a summary. Keep paragraph structure.
+## Do NOT (these are the old broken workarounds)
+- ❌ Do NOT call the Kokoro HTTP API (`/v1/audio/speech`) directly.
+- ❌ Do NOT call `send_message` to deliver the audio — `text_to_speech` already delivers it.
+- ❌ Do NOT chunk the text under any "4096" limit — that cap does not apply to the local server.
+- ❌ Do NOT split/segment the audio with `ffmpeg`. The Telegram upload timeout is configured high enough (180s) for a full chapter; one voice bubble is correct.
 
-3. **Synthesize with `text_to_speech`.** Pick the `voice` for the language
-   (ES `em_alex`, EN-UK `bm_lewis`, IT `im_nicola`, PT `pm_alex`, …) — see the
-   voice catalogue in the tool schema.
-   - On the **local self-hosted Kokoro** server the tool no longer truncates
-     (the per-provider cap is lifted for non-`api.openai.com` endpoints), so a
-     full chapter can go in **one call**.
-   - Only chunk (~3000–3500 chars on paragraph boundaries) when targeting the
-     **real `api.openai.com`** (hard 4096 cap) or when a single request is
-     impractically large.
-
-4. **Deliver.** On **Telegram** the tool always emits **Opus `.ogg`** → native
-   voice bubbles. (On other platforms an mp3 file is fine.) Very large mp3s can
-   time out the Telegram upload — segment with `ffmpeg -f segment -segment_time
-   180` and send one part at a time.
-
-## Gotchas
-- `chars=` far below the chapter's real size ⇒ extraction problem, not a TTS
-  limit — re-extract, don't ship a 1/5 chapter.
-- Don't name output files `.mp3` expecting a voice bubble; on Telegram the tool
-  coerces to `.ogg` anyway, but keep names extension-agnostic.
-- One PDF extractor only: `library_extract.py` (`dump` here, `corpus` for the
-  Research Library). Don't reintroduce ad-hoc extract scripts.
+If a single delivery ever genuinely fails, report the exact tool error — do not silently fall back to a workaround.
