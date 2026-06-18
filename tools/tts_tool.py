@@ -2096,11 +2096,13 @@ def _normalize_tts_text(text: str) -> str:
     into the next sentence. The single, universal structural signal in plain
     text is the blank-line paragraph break, so we honor exactly that: every
     blank-line-separated block that doesn't already end in terminal punctuation
-    is closed with a period. We also strip Markdown heading markers (``#`` is
-    markup, not content). This is deliberately NOT heading/number detection —
-    no assumptions about length, numbering, or language. Non-destructive: only
-    appends punctuation and removes ``#`` markers. (Real structural handling —
-    proper heading/section treatment — belongs upstream at ingestion time.)
+    is closed with a period (and, if it opens with a bare ordinal, that number
+    gets its own beat). We also strip Markdown heading markers (``#`` is markup,
+    not content). The only signal used is "a block lacking terminal punctuation
+    is not a sentence" — no length/language/heading-name assumptions, so it
+    doesn't overfit one book. Non-destructive: only appends punctuation and
+    removes ``#`` markers; no word is ever dropped. (Fine structural handling —
+    proper heading/section semantics — belongs upstream at ingestion time.)
     """
     if not text or "\n\n" not in text:
         return text
@@ -2111,6 +2113,14 @@ def _normalize_tts_text(text: str) -> str:
         if not b.strip():
             continue
         if not b.endswith(_TTS_TERMINAL_PUNCT):
+            # A block that doesn't end in terminal punctuation is a
+            # title/heading/fragment, not a sentence. If it OPENS with a bare
+            # ordinal (a chapter/section number), give the number its own beat
+            # so "5 Living in the New Paradigm" reads as "5. Living in the New
+            # Paradigm." (≈ "Chapter 5. ...") instead of "five living...". Then
+            # close the title. Scoped to no-terminal-punct blocks only, so real
+            # sentences that begin with a number are never touched.
+            b = re.sub(r"^(\d{1,4})\s+(?=\S)", r"\1. ", b)
             b = b + "."
         out.append(b)
     return "\n\n".join(out)
