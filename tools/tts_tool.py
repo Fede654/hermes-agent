@@ -1049,16 +1049,22 @@ def _generate_openai_tts(text: str, output_path: str, tts_config: Dict[str, Any]
 
     # Determine response format. Custom OpenAI-compatible servers (e.g. local
     # speaches/Kokoro) reject 'opus' (only mp3/wav/flac/pcm), so for a voice
-    # bubble (.ogg) on a non-OpenAI endpoint we fetch a LOSSLESS WAV and
-    # transcode to Opus via ffmpeg — making Opus the only lossy step. (mp3 as
-    # the intermediate would be double-lossy: server-side mp3 encode + opus
-    # encode = two generations of compression artifacts.) Canonical
-    # api.openai.com supports opus natively → request it direct.
+    # bubble (.ogg) on a non-OpenAI endpoint we synthesize to an intermediate
+    # and transcode to Opus via ffmpeg.
+    #
+    # We use **mp3** as the intermediate, NOT wav: speaches/Kokoro emits a
+    # broken RIFF header on long audio — the PCM data is complete (a full
+    # chapter), but the declared `data`/RIFF length caps at ~25s, so ffmpeg (and
+    # any player) reads only the first ~25s and the rest is silently dropped →
+    # truncated voice bubble. mp3 (and pcm) are returned in full; mp3 is
+    # self-describing so ffmpeg gets the true length. The extra mp3→opus step is
+    # mildly double-lossy but is the price of correct, full-length delivery.
+    # Canonical api.openai.com supports opus natively → request it direct.
     _want_opus = output_path.endswith(".ogg")
     _custom_endpoint = bool(base_url) and "api.openai.com" not in base_url
     if _want_opus and _custom_endpoint:
-        response_format = "wav"
-        _synth_path = output_path[:-4] + ".wav"
+        response_format = "mp3"
+        _synth_path = output_path[:-4] + ".mp3"
     elif _want_opus:
         response_format = "opus"
         _synth_path = output_path
