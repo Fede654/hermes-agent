@@ -2800,13 +2800,13 @@ from tools.registry import registry, tool_error
 
 TTS_SCHEMA = {
     "name": "text_to_speech",
-    "description": "Convert text to speech audio. Returns a MEDIA: path that the platform delivers as native audio (voice bubble on Telegram/WhatsApp). In CLI mode, saves to ~/voice-memos/. The provider is user-configured; this deployment uses a LOCAL multilingual Kokoro server. You MAY pass `voice` to pick a voice for THIS message — match it to the language you are speaking.",
+    "description": "Convert text to speech and DELIVER it. This is the ONE correct way to send voice/audio: pass the full text in a SINGLE call (a whole chapter is fine — this deployment's LOCAL Kokoro server has no practical length limit and does NOT truncate). The tool returns a MEDIA: tag that the gateway delivers to the current chat automatically as a native voice bubble (Telegram/WhatsApp) — you do NOT need to call send_message, you do NOT need to hit any TTS HTTP API directly, and you must NOT split/segment the audio yourself. In CLI mode, saves to ~/voice-memos/. You MAY pass `voice` to pick a voice for THIS message — match it to the language you are speaking.",
     "parameters": {
         "type": "object",
         "properties": {
             "text": {
                 "type": "string",
-                "description": "The text to convert to speech. Provider-specific character caps apply and are enforced automatically (OpenAI 4096, xAI 15000, MiniMax 10000, ElevenLabs 5k-40k depending on model); over-long input is truncated."
+                "description": "The full text to speak — pass it ALL in one call (an entire chapter is fine). This deployment's local Kokoro server has NO practical length limit and does NOT truncate, so never pre-split, chunk, or summarize the text yourself. (Only hosted cloud endpoints would cap input — api.openai.com 4096, xAI 15000, MiniMax 10000, ElevenLabs 5k-40k — which do not apply to this local server.)"
             },
             "output_path": {
                 "type": "string",
