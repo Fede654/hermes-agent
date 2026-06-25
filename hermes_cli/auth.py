@@ -538,12 +538,27 @@ KIMI_CODE_CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098"
 KIMI_CODE_OAUTH_HOST = "https://auth.kimi.com"
 
 
+# kimi-code CLI relocated its config from ~/.kimi to ~/.kimi-code in v0.19.
+# Resolve an existing file across both layouts (prefer the current ~/.kimi-code);
+# fall back to ~/.kimi-code for new installs so messages/writes use the live path.
+# Avoids the #1 fresh-agent setup failure: "kimi-coding ... no API key was found"
+# when `kimi login` wrote creds to ~/.kimi-code but the engine only checked ~/.kimi.
+def _kimi_cli_path(*parts: str) -> Path:
+    new = Path.home() / ".kimi-code" / Path(*parts)
+    old = Path.home() / ".kimi" / Path(*parts)
+    if new.exists():
+        return new
+    if old.exists():
+        return old
+    return new
+
+
 def _kimi_cli_credentials_path() -> Path:
-    return Path.home() / ".kimi" / "credentials" / "kimi-code.json"
+    return _kimi_cli_path("credentials", "kimi-code.json")
 
 
 def _kimi_cli_device_id_path() -> Path:
-    return Path.home() / ".kimi" / "device_id"
+    return _kimi_cli_path("device_id")
 
 
 def _kimi_cli_version() -> str:
