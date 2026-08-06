@@ -1283,7 +1283,7 @@ _BLUEPRINTS_DIR = Path(__file__).parent.parent / "blueprints"
 def _load_story() -> dict:
     if _STORY_PATH.exists():
         try:
-            return json.loads(_STORY_PATH.read_text())
+            return json.loads(_STORY_PATH.read_text(encoding="utf-8"))
         except Exception:
             pass
     return {
@@ -1305,7 +1305,7 @@ def _load_story() -> dict:
 
 def _save_story(story: dict) -> None:
     _STORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _STORY_PATH.write_text(json.dumps(story, indent=2))
+    _STORY_PATH.write_text(json.dumps(story, indent=2), encoding="utf-8")
 
 
 def _handle_mc_story(args: dict, **kwargs) -> str:

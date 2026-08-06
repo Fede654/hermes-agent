@@ -111,6 +111,12 @@ const PAIR_JSON = args.includes('--pair-json');
 const WHATSAPP_MODE = getArg('mode', process.env.WHATSAPP_MODE || 'self-chat'); // "bot" or "self-chat"
 const WHATSAPP_DM_POLICY = String(process.env.WHATSAPP_DM_POLICY || 'open').trim().toLowerCase();
 const ALLOWED_USERS = parseAllowedUsers(process.env.WHATSAPP_ALLOWED_USERS || '');
+const IGNORED_CHATS = new Set(
+  (process.env.WHATSAPP_IGNORED_CHATS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+);
 const DEFAULT_REPLY_PREFIX = '⚕ *Hermes Agent*\n────────────\n';
 const REPLY_PREFIX = process.env.WHATSAPP_REPLY_PREFIX === undefined
   ? DEFAULT_REPLY_PREFIX
@@ -549,6 +555,16 @@ async function startSocket() {
         senderId: redactWhatsAppId(senderId),
         messageKeys: Object.keys(msg.message || {}),
       });
+
+      if (IGNORED_CHATS.has(chatId)) {
+        emitDebugEvent({
+          stage: 'ignored',
+          reason: 'ignored_chat',
+          chatId: redactWhatsAppId(chatId),
+          senderId: redactWhatsAppId(senderId),
+        });
+        continue;
+      }
 
       // Handle fromMe messages based on mode
       let fromOwner = false;

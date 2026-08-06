@@ -442,6 +442,13 @@ class GoalState:
     # constraints / boundaries / stop_when). Empty by default; a goal with
     # no contract behaves exactly like the original free-form goal.
     contract: GoalContract = field(default_factory=GoalContract)
+    # Phase B — metric-aware goals. When `metric_key` and `acceptance_criterion`
+    # are both set AND the criterion parses, the goal-loop judge bypasses the
+    # auxiliary LLM and decides 'done'/'continue' deterministically off the
+    # last METRIC: line in the agent's response.
+    metric_key: Optional[str] = None
+    acceptance_criterion: Optional[str] = None
+    last_metric_value: Optional[float] = None
 
     def to_json(self) -> str:
         data = asdict(self)
@@ -455,6 +462,11 @@ class GoalState:
         subgoals: List[str] = []
         if isinstance(raw_subgoals, list):
             subgoals = [str(s).strip() for s in raw_subgoals if str(s).strip()]
+        last_metric_raw = data.get("last_metric_value")
+        try:
+            last_metric_value = float(last_metric_raw) if last_metric_raw is not None else None
+        except (TypeError, ValueError):
+            last_metric_value = None
         return cls(
             goal=data.get("goal", ""),
             status=data.get("status", "active"),
@@ -474,6 +486,9 @@ class GoalState:
             waiting_reason=data.get("waiting_reason"),
             waiting_since=float(data.get("waiting_since", 0.0) or 0.0),
             contract=GoalContract.from_dict(data.get("contract")),
+            metric_key=data.get("metric_key"),
+            acceptance_criterion=data.get("acceptance_criterion"),
+            last_metric_value=last_metric_value,
         )
 
     # --- contract helpers -------------------------------------------------
@@ -1072,6 +1087,130 @@ def _extract_json_object(raw: str) -> Optional[Dict[str, Any]]:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Phase B — metric-aware goal verdict (deterministic, no LLM judge)
+# ──────────────────────────────────────────────────────────────────────
+
+# Same shape as the regex used by agent.research.metrics — keep them in
+# sync if either side changes.
+_METRIC_LINE_RE = re.compile(
+    r"METRIC:\s*(\w[\w.]*)\s*=\s*([-+]?\d+(?:\.\d+)?)"
+)
+
+
+def _extract_metric_value(response: str, metric_key: str) -> Optional[float]:
+    """Find the latest 'METRIC: <key>=<value>' line whose key matches.
+    Last match wins so the most recent emission is authoritative across
+    multi-line responses. Returns None when no match parses as float."""
+    if not response or not metric_key:
+        return None
+    last: Optional[float] = None
+    for match in _METRIC_LINE_RE.finditer(response):
+        if match.group(1) == metric_key:
+            try:
+                last = float(match.group(2))
+            except ValueError:
+                continue
+    return last
+
+
+def _metric_verdict(
+    state: "GoalState",
+    response: str,
+) -> Tuple[Optional[str], str, Optional[float]]:
+    """Deterministic judge for metric-aware goals.
+
+    Returns ``(verdict, reason, observed_value)``:
+
+    * ``verdict='done'`` — the observed value satisfies the criterion.
+    * ``verdict='continue'`` — value observed but below threshold, OR no
+      METRIC line was emitted this turn.
+    * ``verdict=None`` — the goal is not metric-aware, or the criterion
+      is qualitative and unparseable. Caller falls back to the LLM judge.
+
+    ``observed_value`` is whatever was parsed from the response (may be
+    None even when verdict is 'continue').
+    """
+    if not state.metric_key or not state.acceptance_criterion:
+        return None, "metric_key/acceptance_criterion not set", None
+
+    # Defensive import — avoid putting agent.research at module import time
+    # since hermes_cli is loaded by lighter-weight CLI paths too. Failures
+    # here must not wedge the goal loop.
+    try:
+        from agent.research.supervisor import _parse_acceptance_criterion
+    except Exception as exc:  # pragma: no cover — import smoke test
+        logger.debug("metric verdict: parser import failed: %s", exc)
+        return None, "acceptance criterion parser unavailable", None
+
+    test = _parse_acceptance_criterion(state.acceptance_criterion)
+    value = _extract_metric_value(response, state.metric_key)
+
+    if test is None:
+        # Qualitative criterion (e.g. "looks good to a reviewer") — defer
+        # to the LLM judge but still record the metric value if present.
+        return None, "criterion not parseable; deferring to LLM judge", value
+
+    if value is None:
+        return "continue", f"no {state.metric_key} reported in response", None
+
+    if test(value):
+        return "done", (
+            f"{state.metric_key}={value} satisfies "
+            f"'{state.acceptance_criterion}'"
+        ), value
+    return "continue", (
+        f"{state.metric_key}={value} does not satisfy "
+        f"'{state.acceptance_criterion}'"
+    ), value
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Phase B — /goal text splitter (shared across gateway / cli / tui)
+# ──────────────────────────────────────────────────────────────────────
+
+# Trailing pattern: " ... [optional comma] <key> <op> <number>"
+_GOAL_TAIL_METRIC_RE = re.compile(
+    r",?\s*(\w[\w.]*)\s*(>=|<=|>|<|==)\s*([-+]?\d+(?:\.\d+)?)\s*$"
+)
+
+
+def _split_goal_text_and_criterion(
+    raw: str,
+) -> Tuple[str, Optional[str], Optional[str]]:
+    """Try to split ``/goal`` text into ``(goal_text, metric_key, criterion)``.
+
+    Recognises trailing patterns like ``"Improve X, pass_rate >= 0.95"`` →
+    ``("Improve X", "pass_rate", "pass_rate >= 0.95")``.
+
+    Falls back to ``(raw, None, None)`` when:
+      * no parseable metric tail, OR
+      * stripping the tail would leave an empty goal text (we never want
+        ``/goal pass_rate >= 0.95`` to set goal=""), OR
+      * the matched criterion fails to parse via ``_parse_acceptance_criterion``.
+    """
+    raw = (raw or "").strip()
+    m = _GOAL_TAIL_METRIC_RE.search(raw)
+    if not m:
+        return raw, None, None
+
+    prefix = raw[: m.start()].rstrip(", \t")
+    if not prefix:
+        # Bare criterion with no goal text — keep raw as-is so set() raises
+        # the same "goal text is empty" path the caller already handles.
+        return raw, None, None
+
+    criterion = f"{m.group(1)} {m.group(2)} {m.group(3)}"
+    try:
+        from agent.research.supervisor import _parse_acceptance_criterion
+        if _parse_acceptance_criterion(criterion) is None:
+            return raw, None, None
+    except Exception:
+        return raw, None, None
+
+    return prefix, m.group(1), criterion
+
+
+# ──────────────────────────────────────────────────────────────────────
 # GoalManager — the orchestration surface CLI + gateway talk to
 # ──────────────────────────────────────────────────────────────────────
 
@@ -1142,7 +1281,15 @@ class GoalManager:
 
     # --- mutation -----------------------------------------------------
 
-    def set(self, goal: str, *, max_turns: Optional[int] = None, contract: Optional[GoalContract] = None) -> GoalState:
+    def set(
+        self,
+        goal: str,
+        *,
+        max_turns: Optional[int] = None,
+        contract: Optional[GoalContract] = None,
+        metric_key: Optional[str] = None,
+        acceptance_criterion: Optional[str] = None,
+    ) -> GoalState:
         goal = (goal or "").strip()
         if not goal:
             raise ValueError("goal text is empty")
@@ -1154,6 +1301,8 @@ class GoalManager:
             created_at=time.time(),
             last_turn_at=0.0,
             contract=contract if contract is not None else GoalContract(),
+            metric_key=metric_key,
+            acceptance_criterion=acceptance_criterion,
         )
         self._state = state
         save_goal(self.session_id, state)
@@ -1443,13 +1592,28 @@ class GoalManager:
         state.turns_used += 1
         state.last_turn_at = time.time()
 
-        verdict, reason, parse_failed, wait_directive, transport_failed = judge_goal(
-            state.goal,
-            last_response,
-            subgoals=state.subgoals or None,
-            background_processes=background_processes,
-            contract=state.contract if state.has_contract() else None,
-        )
+        # Phase B — metric-aware fast path. When the goal carries a
+        # parseable acceptance criterion AND a metric value is observed
+        # in the response, decide deterministically and skip the LLM
+        # judge call entirely. Qualitative criteria fall through to
+        # judge_goal as usual (passing any /subgoal criteria along).
+        wait_directive = None
+        transport_failed = False
+        m_verdict, m_reason, m_value = _metric_verdict(state, last_response)
+        if m_value is not None:
+            state.last_metric_value = m_value
+        if m_verdict is not None:
+            verdict = m_verdict
+            reason = m_reason
+            parse_failed = False
+        else:
+            verdict, reason, parse_failed, wait_directive, transport_failed = judge_goal(
+                state.goal,
+                last_response,
+                subgoals=state.subgoals or None,
+                background_processes=background_processes,
+                contract=state.contract if state.has_contract() else None,
+            )
         state.last_verdict = verdict
         state.last_reason = reason
 

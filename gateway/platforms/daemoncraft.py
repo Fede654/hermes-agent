@@ -208,7 +208,7 @@ class DaemonCraftAdapter(BasePlatformAdapter):
             bot_user = (os.getenv("MC_USERNAME") or self._bot_username or "CompAII")
             queue_path = Path.home() / ".hermes" / "sessions" / f"{bot_user}-events.jsonl"
             queue_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(queue_path, "a") as f:
+            with open(queue_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(event) + "\n")
         except Exception as e:
             logger.warning("[DaemonCraft] Failed to write event to queue: %s", e)

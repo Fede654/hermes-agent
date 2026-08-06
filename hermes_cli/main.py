@@ -4426,6 +4426,118 @@ def _prompt_api_key(
     return existing_key, False
 
 
+def _model_flow_kimi(config, current_model=""):
+    """Kimi / Moonshot model selection with automatic endpoint routing.
+
+    - sk-kimi-* keys   → api.kimi.com/coding/v1  (Kimi Coding Plan)
+    - Other keys        → api.moonshot.ai/v1      (legacy Moonshot)
+
+    No manual base URL prompt — endpoint is determined by key prefix.
+    """
+    from hermes_cli.auth import (
+        PROVIDER_REGISTRY,
+        KIMI_CODE_BASE_URL,
+        _prompt_model_selection,
+        _save_model_choice,
+        deactivate_provider,
+    )
+    from hermes_cli.config import (
+        get_env_value,
+        save_env_value,
+        load_config,
+        save_config,
+    )
+    from hermes_cli.models import _PROVIDER_MODELS
+
+    provider_id = "kimi-coding"
+    pconfig = PROVIDER_REGISTRY[provider_id]
+    key_env = pconfig.api_key_env_vars[0] if pconfig.api_key_env_vars else ""
+    base_url_env = pconfig.base_url_env_var or ""
+
+    # Step 1: Check for credentials — prefer OAuth, then env API key, then prompt
+    existing_key = ""
+    for ev in pconfig.api_key_env_vars:
+        existing_key = get_env_value(ev) or os.getenv(ev, "")
+        if existing_key:
+            break
+
+    oauth_available = False
+    if not existing_key:
+        try:
+            from hermes_cli.auth import resolve_kimi_coding_runtime_credentials
+            oauth_creds = resolve_kimi_coding_runtime_credentials()
+            if oauth_creds.get("source") in {"kimi-cli-oauth", "kimi-cli-oauth-refresh"}:
+                oauth_available = True
+                print(f"  {pconfig.name} OAuth: {oauth_creds['auth_file']} ✓")
+                print()
+        except Exception:
+            pass
+
+    if not existing_key and not oauth_available:
+        existing_key, abort = _prompt_api_key(
+            pconfig, existing_key, provider_id=provider_id
+        )
+        if abort:
+            return
+    elif existing_key:
+        print(f"  {pconfig.name} API key: {existing_key[:8]}... ✓")
+        print()
+
+    # Step 2: Auto-detect endpoint from key prefix or OAuth
+    is_coding_plan = oauth_available or existing_key.startswith("sk-kimi-")
+    if is_coding_plan:
+        effective_base = KIMI_CODE_BASE_URL
+        print(f"  Detected Kimi Coding Plan key → {effective_base}")
+    else:
+        effective_base = pconfig.inference_base_url
+        print(f"  Using Moonshot endpoint → {effective_base}")
+    # Clear any manual base URL override so auto-detection works at runtime
+    if base_url_env and get_env_value(base_url_env):
+        save_env_value(base_url_env, "")
+    print()
+
+    # Step 3: Model selection — show appropriate models for the endpoint
+    if is_coding_plan:
+        # Coding Plan models (kimi-k2.7-code first, the latest)
+        model_list = [
+            "kimi-k2.7-code",
+            "kimi-k2.6",
+            "kimi-k2.5",
+            "kimi-for-coding",
+            "kimi-k2-thinking",
+            "kimi-k2-thinking-turbo",
+        ]
+    else:
+        # Legacy Moonshot models (excludes Coding Plan-only models)
+        model_list = _PROVIDER_MODELS.get("moonshot", [])
+
+    if model_list:
+        selected = _prompt_model_selection(model_list, current_model=current_model)
+    else:
+        try:
+            selected = input("Enter model name: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            selected = None
+
+    if selected:
+        _save_model_choice(selected)
+
+        # Update config with provider and base URL
+        cfg = load_config()
+        model = cfg.get("model")
+        if not isinstance(model, dict):
+            model = {"default": model} if model else {}
+            cfg["model"] = model
+        model["provider"] = provider_id
+        model["base_url"] = effective_base
+        model.pop("api_mode", None)  # let runtime auto-detect from URL
+        save_config(cfg)
+        deactivate_provider()
+
+        endpoint_label = "Kimi Coding" if is_coding_plan else "Moonshot"
+        print(f"Default model set to: {selected} (via {endpoint_label})")
+    else:
+        print("No change.")
 
 
 def _infer_stepfun_region(base_url: str) -> str:

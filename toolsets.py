@@ -66,8 +66,8 @@ _HERMES_CORE_TOOLS = [
     "session_search",
     # Clarifying questions
     "clarify",
-    # Code execution + delegation
-    "execute_code", "delegate_task",
+    # Code execution + delegation + research loop
+    "execute_code", "delegate_task", "run_research", "research_job",
     # Cronjob management
     "cronjob",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
@@ -196,6 +196,12 @@ TOOLSETS = {
         "includes": []
     },
     
+    "research": {
+        "description": "Iterative self-improving research loop: run_research spawns worker subagents, scores output against a metric, and applies LLM-guided hypothesis revision across iterations. research_job is the detached, resumable variant for long-running loops (>5min).",
+        "tools": ["run_research", "research_job"],
+        "includes": []
+    },
+
     "browser": {
         "description": "Browser automation for web interaction (navigate, click, type, scroll, iframes, hold-click) with web search for finding URLs",
         "tools": [
@@ -300,6 +306,17 @@ TOOLSETS = {
             "kanban_create", "kanban_link",
             "kanban_unblock",
             "kanban_attach", "kanban_attach_url", "kanban_attachments",
+        ],
+        "includes": [],
+    },
+
+    "minecraft": {
+        "description": "Minecraft embodied agent tools — perceive, navigate, build, craft, combat, manage, screenshot, command, story, registry",
+        "tools": [
+            "mc_perceive", "mc_move", "mc_mine", "mc_build",
+            "mc_craft", "mc_combat", "mc_manage", "mc_plan",
+            "mc_screenshot", "mc_command", "mc_story", "mc_registry",
+            "mc_chat", "mc_no_op",
         ],
         "includes": [],
     },

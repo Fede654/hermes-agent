@@ -405,6 +405,30 @@ FALLBACK_MAX_TEXT_LENGTH = 4000
 # Back-compat alias. Prefer ``_resolve_max_text_length()`` for new code.
 MAX_TEXT_LENGTH = FALLBACK_MAX_TEXT_LENGTH
 
+# The "openai" cap (4096) is the api.openai.com per-request limit. When the
+# OpenAI-compatible provider is pointed at a self-hosted endpoint (speaches/
+# Kokoro, LiteLLM, vLLM, ...), that limit does not apply, and capping at 4096
+# silently truncates long input (e.g. a full chapter -> ~27s of audio). Use a
+# generous cap for custom endpoints; an explicit
+# ``tts.openai.max_text_length`` override still wins.
+SELF_HOSTED_OPENAI_MAX_TEXT_LENGTH = 100000
+
+
+def _openai_endpoint_is_self_hosted(prov_cfg: Optional[Dict[str, Any]]) -> bool:
+    """True when the OpenAI-compatible TTS provider targets a non-OpenAI host.
+
+    A configured ``tts.openai.base_url`` (or the ``OPENAI_BASE_URL`` env var)
+    pointing anywhere other than ``api.openai.com`` means a self-hosted /
+    OpenAI-compatible server, which does not enforce the 4096-char limit.
+    Mirrors the ``_custom_endpoint`` check in the synthesis path.
+    """
+    base_url = ""
+    if isinstance(prov_cfg, dict):
+        base_url = str(prov_cfg.get("base_url") or "").strip()
+    if not base_url:
+        base_url = (get_env_value("OPENAI_BASE_URL") or "").strip()
+    return bool(base_url) and "api.openai.com" not in base_url
+
 
 def _resolve_max_text_length(
     provider: Optional[str],
@@ -446,6 +470,11 @@ def _resolve_max_text_length(
             return mapped
 
     if key in PROVIDER_MAX_TEXT_LENGTH:
+        # The OpenAI 4096 cap only applies to api.openai.com. A self-hosted
+        # OpenAI-compatible TTS server (speaches/Kokoro et al.) has no such
+        # limit, so don't truncate against it.
+        if key == "openai" and _openai_endpoint_is_self_hosted(prov_cfg):
+            return SELF_HOSTED_OPENAI_MAX_TEXT_LENGTH
         return PROVIDER_MAX_TEXT_LENGTH[key]
 
     # User-declared command provider (under tts.providers.<name>)
@@ -1541,7 +1570,30 @@ def _generate_openai_tts(
         )
         model = DEFAULT_OPENAI_MODEL
 
-    response_format = _tts_response_format_from_path(output_path)
+    # Determine response format. Custom OpenAI-compatible servers (e.g. local
+    # speaches/Kokoro) reject 'opus' (only mp3/wav/flac/pcm), so for a voice
+    # bubble (.ogg) on a non-OpenAI endpoint we synthesize to an intermediate
+    # and transcode to Opus via ffmpeg.
+    #
+    # We use **mp3** as the intermediate, NOT wav: speaches/Kokoro emits a
+    # broken RIFF header on long audio — the PCM data is complete (a full
+    # chapter), but the declared `data`/RIFF length caps at ~25s, so ffmpeg (and
+    # any player) reads only the first ~25s and the rest is silently dropped →
+    # truncated voice bubble. mp3 (and pcm) are returned in full; mp3 is
+    # self-describing so ffmpeg gets the true length. The extra mp3→opus step is
+    # mildly double-lossy but is the price of correct, full-length delivery.
+    # Canonical api.openai.com supports opus natively → request it direct.
+    _want_opus = output_path.endswith(".ogg")
+    _custom_endpoint = bool(base_url) and "api.openai.com" not in base_url
+    if _want_opus and _custom_endpoint:
+        response_format = "mp3"
+        _synth_path = output_path[:-4] + ".mp3"
+    elif _want_opus:
+        response_format = "opus"
+        _synth_path = output_path
+    else:
+        response_format = _tts_response_format_from_path(output_path)
+        _synth_path = output_path
 
     OpenAIClient = _import_openai_client()
     client = OpenAIClient(api_key=api_key, base_url=base_url)
@@ -1561,7 +1613,22 @@ def _generate_openai_tts(
             create_kwargs["extra_body"] = {"lang_code": language}
         response = client.audio.speech.create(**create_kwargs)
 
-        response.stream_to_file(output_path)
+        response.stream_to_file(_synth_path)
+        if _want_opus and _custom_endpoint:
+            _ogg = _convert_to_opus(_synth_path)
+            if _ogg:
+                if _synth_path != output_path and os.path.exists(_synth_path):
+                    try:
+                        os.remove(_synth_path)
+                    except Exception:
+                        pass
+                return output_path
+            # ffmpeg unavailable/failed — leave the mp3 at the expected path
+            try:
+                if _synth_path != output_path:
+                    os.replace(_synth_path, output_path)
+            except Exception:
+                pass
         return output_path
     finally:
         close = getattr(client, "close", None)
@@ -2778,9 +2845,58 @@ def _generate_kittentts(text: str, output_path: str, tts_config: Dict[str, Any])
 # ===========================================================================
 # Main tool function
 # ===========================================================================
+
+# Long readings get a slightly slower default pace for intelligibility (the
+# caller can always pass an explicit speed to override).
+LONG_READING_CHARS = 3000
+LONG_READING_SPEED = 0.9
+
+_TTS_TERMINAL_PUNCT = (".", "!", "?", "…", ":", ";", "»", '"', "'", ")", "]")
+_MD_HEADING_MARKER = re.compile(r"(?m)^\s{0,3}#{1,6}\s+")
+
+
+def _normalize_tts_text(text: str) -> str:
+    """Make text pause correctly in TTS without book-specific heuristics.
+
+    Kokoro (and most TTS) only pause/close intonation on terminal punctuation,
+    so a title/heading sitting on its own paragraph WITHOUT punctuation gets run
+    into the next sentence. The single, universal structural signal in plain
+    text is the blank-line paragraph break, so we honor exactly that: every
+    blank-line-separated block that doesn't already end in terminal punctuation
+    is closed with a period (and, if it opens with a bare ordinal, that number
+    gets its own beat). We also strip Markdown heading markers (``#`` is markup,
+    not content). The only signal used is "a block lacking terminal punctuation
+    is not a sentence" — no length/language/heading-name assumptions, so it
+    doesn't overfit one book. Non-destructive: only appends punctuation and
+    removes ``#`` markers; no word is ever dropped. (Fine structural handling —
+    proper heading/section semantics — belongs upstream at ingestion time.)
+    """
+    if not text or "\n\n" not in text:
+        return text
+    blocks = re.split(r"\n\s*\n", text)
+    out = []
+    for block in blocks:
+        b = _MD_HEADING_MARKER.sub("", block).rstrip()
+        if not b.strip():
+            continue
+        if not b.endswith(_TTS_TERMINAL_PUNCT):
+            # A block that doesn't end in terminal punctuation is a
+            # title/heading/fragment, not a sentence. If it OPENS with a bare
+            # ordinal (a chapter/section number), give the number its own beat
+            # so "5 Living in the New Paradigm" reads as "5. Living in the New
+            # Paradigm." (≈ "Chapter 5. ...") instead of "five living...". Then
+            # close the title. Scoped to no-terminal-punct blocks only, so real
+            # sentences that begin with a number are never touched.
+            b = re.sub(r"^(\d{1,4})\s+(?=\S)", r"\1. ", b)
+            b = b + "."
+        out.append(b)
+    return "\n\n".join(out)
+
+
 def text_to_speech_tool(
     text: str,
     output_path: Optional[str] = None,
+    voice: Optional[str] = None,
     speed: Optional[float] = None,
     instructions: Optional[str] = None,
     provider: Optional[str] = None,
@@ -2798,6 +2914,8 @@ def text_to_speech_tool(
     Args:
         text: The text to convert to speech.
         output_path: Optional custom save path. Defaults to ~/voice-memos/<timestamp>.mp3
+        voice: Optional per-call voice override (model-selected), e.g. for
+            per-message multilingual voice selection on a local Kokoro server.
         speed: Optional playback speed multiplier (0.25-4.0). Overrides config.yaml.
         instructions: Optional voice-design guidance (tone, emotion, pacing,
             accent, whispering). Forwarded to the OpenAI backend
@@ -2826,14 +2944,38 @@ def text_to_speech_tool(
     if not text:
         return tool_error("Text is empty after TTS cleanup", success=False)
 
+    # Honor paragraph structure so titles/sections pause instead of running on.
+    text = _normalize_tts_text(text)
+    # Long readings default to a slightly slower pace (caller's explicit speed wins).
+    if speed is None and len(text) > LONG_READING_CHARS:
+        speed = LONG_READING_SPEED
+
     tts_config = _load_tts_config()
 
-    # When the model supplies a speed parameter, inject it into the config
-    # so all downstream provider functions pick it up uniformly.
-    if speed is not None:
-        clamped = max(0.25, min(4.0, float(speed)))
-        tts_config = dict(tts_config)  # shallow copy to avoid mutating the cache
-        tts_config["speed"] = clamped
+    # When the model supplies a speed and/or voice parameter, inject them into
+    # the config (top-level and active-provider section) so all downstream
+    # provider functions pick them up uniformly for THIS synthesis only — a
+    # shallow copy keeps the cached config untouched. Voice enables per-message
+    # multilingual voice selection (e.g. local Kokoro).
+    if speed is not None or (isinstance(voice, str) and voice.strip()):
+        tts_config = dict(tts_config)
+        try:
+            _prov = _get_provider(tts_config)
+        except Exception:
+            _prov = None
+        _sec = dict(tts_config[_prov]) if isinstance(tts_config.get(_prov), dict) else None
+        if speed is not None:
+            clamped = max(0.25, min(4.0, float(speed)))
+            tts_config["speed"] = clamped
+            if _sec is not None:
+                _sec["speed"] = clamped
+        if isinstance(voice, str) and voice.strip():
+            _v = voice.strip()
+            tts_config["voice"] = _v
+            if _sec is not None:
+                _sec["voice"] = _v
+        if _sec is not None and _prov:
+            tts_config[_prov] = _sec
 
     # Allow per-call provider override; fall back to the configured default.
     if provider:
@@ -2917,6 +3059,19 @@ def text_to_speech_tool(
             file_path = out_dir / f"tts_{timestamp}.ogg"
         else:
             file_path = out_dir / f"tts_{timestamp}.mp3"
+
+    # Telegram: always deliver Opus voice bubbles. Coerce any non-.ogg path to
+    # .ogg for opus-capable built-in providers so even an explicit output_path
+    # like "chapter.mp3" becomes a voice bubble (the openai/Kokoro path then
+    # synthesizes lossless WAV and transcodes to Opus). Command providers keep
+    # their configured format.
+    if (
+        want_opus
+        and command_provider_config is None
+        and provider in {"openai", "elevenlabs", "mistral", "gemini"}
+        and file_path.suffix.lower() != ".ogg"
+    ):
+        file_path = file_path.with_suffix(".ogg")
 
     # Ensure parent directory exists
     file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3823,17 +3978,21 @@ from tools.registry import registry, tool_error
 
 TTS_SCHEMA = {
     "name": "text_to_speech",
-    "description": "Convert text to speech audio. Returns a MEDIA: path that the platform delivers as native audio. Compatible providers render as a voice bubble on Telegram; otherwise audio is sent as a regular attachment. In CLI mode, saves to ~/voice-memos/. Voice and provider are user-configured (built-in providers like edge/openai or custom command providers under tts.providers.<name>), not model-selected.",
+    "description": "Convert text to speech and DELIVER it. This is the ONE correct way to send voice/audio: pass the full text in a SINGLE call (a whole chapter is fine — this deployment's LOCAL Kokoro server has no practical length limit and does NOT truncate). The tool returns a MEDIA: tag that the gateway delivers to the current chat automatically as a native voice bubble (Telegram/WhatsApp) — you do NOT need to call send_message, you do NOT need to hit any TTS HTTP API directly, and you must NOT split/segment the audio yourself. In CLI mode, saves to ~/voice-memos/. You MAY pass `voice` to pick a voice for THIS message (match it to the language you are speaking), `speed`/`instructions` to adjust delivery, and `provider` to override the configured backend — all optional; omit any of them to use the configured default.",
     "parameters": {
         "type": "object",
         "properties": {
             "text": {
                 "type": "string",
-                "description": "The text to convert to speech. Provider-specific character caps apply and are enforced automatically (OpenAI 4096, xAI 15000, MiniMax 10000, ElevenLabs 5k-40k depending on model); over-long input is truncated."
+                "description": "The full text to speak — pass it ALL in one call (an entire chapter is fine). This deployment's local Kokoro server has NO practical length limit and does NOT truncate, so never pre-split, chunk, or summarize the text yourself. (Only hosted cloud endpoints would cap input — api.openai.com 4096, xAI 15000, MiniMax 10000, ElevenLabs 5k-40k — which do not apply to this local server.)"
             },
             "output_path": {
                 "type": "string",
                 "description": f"Optional custom file path to save the audio. Defaults to {display_hermes_home()}/audio_cache/<timestamp>.mp3"
+            },
+            "voice": {
+                "type": "string",
+                "description": "Optional Kokoro voice for THIS message (local multilingual TTS). Pick by language: Spanish em_alex/em_santa(m), ef_dora(f); English-UK bm_lewis/bm_george/bm_daniel/bm_fable(m), bf_emma/bf_alice/bf_isabella/bf_lily(f); English-US am_adam/am_michael/am_onyx(m), af_heart/af_bella/af_nova/af_sarah(f); Portuguese pm_alex/pm_santa(m), pf_dora(f); French ff_siwis(f); Italian im_nicola(m)/if_sara(f); Hindi hm_omega/hm_psi(m), hf_alpha/hf_beta(f); Japanese jm_kumo(m)/jf_alpha(f); Chinese zm_yunxi/zm_yunyang(m), zf_xiaoxiao/zf_xiaoni(f). Omit to use the configured default (em_alex, Spanish male). Always match the voice's language to the language of the text."
             },
             "speed": {
                 "type": "number",
@@ -3870,6 +4029,7 @@ registry.register(
     handler=lambda args, **kw: text_to_speech_tool(
         text=args.get("text", ""),
         output_path=args.get("output_path"),
+        voice=args.get("voice"),
         speed=args.get("speed"),
         instructions=args.get("instructions"),
         provider=args.get("provider")),

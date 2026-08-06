@@ -1486,9 +1486,27 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             def _execute(next_args: dict) -> Any:
                 target = next_args.get("target", "memory")
                 operations = next_args.get("operations")
+                _action = next_args.get("action")
+                # Native MEMORY.md/USER.md are retired (2026-06-15). When the
+                # store is disabled, route the model's reflexive
+                # memory(action=add/replace) calls to HMK via the provider's
+                # `remember` tool so deliberate saves SUCCEED instead of
+                # dead-ending into an error (which caused retry loops).
+                if (agent._memory_store is None and agent._memory_manager is not None
+                        and agent._memory_manager.has_tool("remember")
+                        and _action in {"add", "replace"}):
+                    _content = (next_args.get("content") or "").strip()
+                    if _content:
+                        _shelf = "identity" if target == "user" else "library"
+                        _title = (_content.split("\n", 1)[0][:60].strip() or "memory")
+                        return agent._memory_manager.handle_tool_call(
+                            "remember",
+                            {"content": _content, "title": _title, "shelf": _shelf,
+                             "tags": "via-memory-tool", "importance": 5.0},
+                        )
                 from tools.memory_tool import memory_tool as _memory_tool
                 result = _memory_tool(
-                    action=next_args.get("action"),
+                    action=_action,
                     target=target,
                     content=next_args.get("content"),
                     old_text=next_args.get("old_text"),

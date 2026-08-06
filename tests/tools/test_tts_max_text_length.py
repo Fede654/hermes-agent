@@ -45,6 +45,32 @@ class TestResolveMaxTextLength:
     # --- Overrides ---
 
 
+    # --- Self-hosted OpenAI-compatible endpoint (speaches/Kokoro) ---
+
+    def test_openai_self_hosted_base_url_lifts_cap(self):
+        from tools.tts_tool import SELF_HOSTED_OPENAI_MAX_TEXT_LENGTH
+        cfg = {"openai": {"base_url": "http://192.168.195.154:8090/v1"}}
+        assert _resolve_max_text_length("openai", cfg) == SELF_HOSTED_OPENAI_MAX_TEXT_LENGTH
+
+    def test_openai_official_base_url_keeps_4096(self):
+        cfg = {"openai": {"base_url": "https://api.openai.com/v1"}}
+        assert _resolve_max_text_length("openai", cfg) == 4096
+
+    def test_openai_no_base_url_keeps_4096(self):
+        assert _resolve_max_text_length("openai", {"openai": {"voice": "alloy"}}) == 4096
+
+    def test_openai_explicit_override_beats_self_hosted(self):
+        cfg = {"openai": {"base_url": "http://localhost:8090/v1", "max_text_length": 6000}}
+        assert _resolve_max_text_length("openai", cfg) == 6000
+
+    def test_openai_self_hosted_base_url_via_env(self, monkeypatch):
+        from tools.tts_tool import SELF_HOSTED_OPENAI_MAX_TEXT_LENGTH
+        monkeypatch.setattr(
+            "tools.tts_tool.get_env_value",
+            lambda name, default=None: "http://localhost:8090/v1" if name == "OPENAI_BASE_URL" else default,
+        )
+        assert _resolve_max_text_length("openai", {}) == SELF_HOSTED_OPENAI_MAX_TEXT_LENGTH
+
     # --- ElevenLabs model-aware ---
 
 

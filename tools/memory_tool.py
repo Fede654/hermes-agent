@@ -1063,7 +1063,7 @@ def memory_tool(
     Returns JSON string with results.
     """
     if store is None:
-        return tool_error("Memory is not available. It may be disabled in config or this environment.", success=False)
+        return tool_error("Native MEMORY.md/USER.md are retired \u2014 durable memory now lives in HMK. Use the `remember` tool to save a fact (shelf+title+content), and `recall` to look one up. Do not retry this `memory` tool.", success=False)
 
     # Some strict providers fill optional schema fields with JSON null rather
     # than omitting them.  Treat ``target: null`` as omitted so memory writes

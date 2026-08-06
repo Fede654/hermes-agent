@@ -2383,17 +2383,26 @@ class CLICommandsMixin:
         # lines (verify:, constraints:, boundaries:, stop when:) are parsed
         # into a completion contract; the remaining prose is the headline.
         # A plain free-form goal with no such lines behaves exactly as before.
-        from hermes_cli.goals import parse_contract
+        from hermes_cli.goals import parse_contract, _split_goal_text_and_criterion
 
         headline, contract = parse_contract(arg)
         goal_text = headline or arg
+        # Parse an optional trailing metric criterion ("..., pass_rate >= 0.9")
+        # so the goal judge can short-circuit deterministically (Phase B —
+        # metric-aware /goal).
+        goal_text, metric_key, criterion = _split_goal_text_and_criterion(goal_text)
         try:
-            state = mgr.set(goal_text, contract=contract if not contract.is_empty() else None)
+            state = mgr.set(
+                goal_text, contract=contract if not contract.is_empty() else None,
+                metric_key=metric_key, acceptance_criterion=criterion,
+            )
         except ValueError as exc:
             _cprint(f"  Invalid goal: {exc}")
             return
 
         _cprint(f"  ⊙ Goal set ({state.max_turns}-turn budget): {state.goal}")
+        if state.acceptance_criterion:
+            _cprint(f"  {_DIM}Metric criterion: {state.acceptance_criterion}{_RST}")
         if state.has_contract():
             _cprint(f"  {_DIM}Completion contract:{_RST}")
             for line in state.contract.render_block().splitlines():

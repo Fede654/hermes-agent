@@ -798,3 +798,144 @@ class TestContractAndBackgroundCompose:
         assert verdict == "wait"
         assert wait_directive and wait_directive.get("pid") == 4242
 
+
+
+# ---------------------------------------------------------------------------
+# Phase B — metric-aware /goal
+# ---------------------------------------------------------------------------
+
+class TestGoalStateMetricFields:
+    def test_round_trips_metric_fields(self):
+        from hermes_cli.goals import GoalState
+        s = GoalState(
+            goal="Improve pass rate",
+            metric_key="pass_rate",
+            acceptance_criterion="pass_rate >= 0.9",
+            last_metric_value=0.85,
+        )
+        raw = s.to_json()
+        back = GoalState.from_json(raw)
+        assert back.metric_key == "pass_rate"
+        assert back.acceptance_criterion == "pass_rate >= 0.9"
+        assert back.last_metric_value == 0.85
+
+    def test_default_metric_fields_none(self):
+        from hermes_cli.goals import GoalState
+        s = GoalState(goal="freeform goal")
+        assert s.metric_key is None
+        assert s.acceptance_criterion is None
+        assert s.last_metric_value is None
+
+
+class TestExtractMetricValue:
+    def test_simple(self):
+        from hermes_cli.goals import _extract_metric_value
+        assert _extract_metric_value("METRIC: pass_rate=0.85", "pass_rate") == 0.85
+
+    def test_with_status_suffix(self):
+        from hermes_cli.goals import _extract_metric_value
+        v = _extract_metric_value("METRIC: pass_rate=0.7 STATUS: improved", "pass_rate")
+        assert v == 0.7
+
+    def test_missing_returns_none(self):
+        from hermes_cli.goals import _extract_metric_value
+        assert _extract_metric_value("no metric here", "pass_rate") is None
+
+    def test_wrong_key_returns_none(self):
+        from hermes_cli.goals import _extract_metric_value
+        assert _extract_metric_value("METRIC: latency_ms=200", "pass_rate") is None
+
+    def test_last_match_wins(self):
+        from hermes_cli.goals import _extract_metric_value
+        v = _extract_metric_value(
+            "METRIC: pass_rate=0.5\n... later turn ...\nMETRIC: pass_rate=0.95",
+            "pass_rate",
+        )
+        assert v == 0.95
+
+
+class TestMetricVerdict:
+    def test_done_when_criterion_met(self):
+        from hermes_cli.goals import GoalState, _metric_verdict
+        s = GoalState(
+            goal="t", metric_key="pass_rate",
+            acceptance_criterion="pass_rate >= 0.9",
+        )
+        verdict, reason, value = _metric_verdict(s, "METRIC: pass_rate=0.95")
+        assert verdict == "done"
+        assert "0.95" in reason
+        assert value == 0.95
+
+    def test_continue_when_criterion_unmet(self):
+        from hermes_cli.goals import GoalState, _metric_verdict
+        s = GoalState(
+            goal="t", metric_key="pass_rate",
+            acceptance_criterion="pass_rate >= 0.9",
+        )
+        verdict, reason, value = _metric_verdict(s, "METRIC: pass_rate=0.5")
+        assert verdict == "continue"
+        assert value == 0.5
+
+    def test_continue_when_no_metric_in_response(self):
+        from hermes_cli.goals import GoalState, _metric_verdict
+        s = GoalState(
+            goal="t", metric_key="pass_rate",
+            acceptance_criterion="pass_rate >= 0.9",
+        )
+        verdict, reason, value = _metric_verdict(s, "no metric line at all")
+        assert verdict == "continue"
+        assert value is None
+
+    def test_qualitative_falls_through_but_records_value(self):
+        from hermes_cli.goals import GoalState, _metric_verdict
+        s = GoalState(
+            goal="t", metric_key="pass_rate",
+            acceptance_criterion="looks good to me",
+        )
+        verdict, reason, value = _metric_verdict(s, "METRIC: pass_rate=1.0")
+        assert verdict is None  # fall through to LLM judge
+        assert value == 1.0
+
+    def test_returns_none_when_not_metric_aware(self):
+        from hermes_cli.goals import GoalState, _metric_verdict
+        s = GoalState(goal="freeform")
+        verdict, reason, value = _metric_verdict(s, "METRIC: x=1")
+        assert verdict is None
+        assert value is None
+
+
+class TestSetWithMetricKwargs:
+    def test_set_persists_metric(self, hermes_home):
+        from hermes_cli.goals import GoalManager
+        mgr = GoalManager(session_id="test-set-metric")
+        s = mgr.set(
+            "Improve test pass rate",
+            metric_key="pass_rate",
+            acceptance_criterion="pass_rate >= 0.95",
+        )
+        assert s.metric_key == "pass_rate"
+        assert s.acceptance_criterion == "pass_rate >= 0.95"
+
+
+class TestEvaluateAfterTurnMetricPath:
+    def test_metric_done_bypasses_llm_judge(self, hermes_home, monkeypatch):
+        from hermes_cli import goals
+        from hermes_cli.goals import GoalManager
+
+        called = {"judge": False}
+        def fake_judge(*a, **kw):
+            called["judge"] = True
+            return "continue", "should not be called", False, None, False
+
+        monkeypatch.setattr(goals, "judge_goal", fake_judge)
+
+        mgr = GoalManager(session_id="test-metric-done-bypass")
+        mgr.set(
+            "Improve pass rate",
+            metric_key="pass_rate",
+            acceptance_criterion="pass_rate >= 0.9",
+        )
+        mgr.evaluate_after_turn("METRIC: pass_rate=0.95 NOTES: hit")
+        assert mgr.state.status == "done"
+        assert mgr.state.last_metric_value == 0.95
+        assert called["judge"] is False

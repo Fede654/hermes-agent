@@ -307,6 +307,21 @@ def _try_kimi_oauth_credentials() -> Optional[Dict[str, Any]]:
     return creds
 
 
+def _try_kimi_oauth_credentials() -> Optional[Dict[str, Any]]:
+    """Return Kimi CLI OAuth credentials when available, otherwise None."""
+    try:
+        from hermes_cli.auth import resolve_kimi_coding_runtime_credentials
+
+        creds = resolve_kimi_coding_runtime_credentials()
+    except Exception:
+        return None
+    if not isinstance(creds, dict):
+        return None
+    if not str(creds.get("api_key") or "").strip():
+        return None
+    return creds
+
+
 def _auto_detect_local_model(base_url: str) -> str:
     """Query a local server for its model name when only one model is loaded."""
     if not base_url:
