@@ -65,7 +65,7 @@ Fede-originated (also flow upstream to Nico via PR):
 
 | Feature | Where it lives | Notes |
 |---------|----------------|-------|
-| autoresearch | `agent/research/`, `tools/research_tool.py`, `tools/research_job_tool.py` | Provider-neutral. **Now upstream in `nicoechaniz/main`** (distilled commit `0f6120146`, v0.16.0) — no longer Fede's delta, rides in from the base. Fede's `fix/autoresearch-core-flaws` carries the detached-job / fan-out / `inherit_profile` fixes (**PR #11 → `nicoechaniz/main`**). |
+| autoresearch | `agent/research/`, `tools/research_tool.py`, `tools/research_job_tool.py` | Provider-neutral. Landed in `nicoechaniz/main` once (distilled commit `0f6120146`, 2026-06-14) but **is no longer there** — verified 2026-08-06 that Nico's `feat/autoresearch` is frozen at the same commit as his own `backup/autoresearch-pre-v014`, meaning he dropped it during a later history rebuild. Back to being Fede's full delta; do **not** assume it rides in from the base without re-checking each sync. Fede's `fix/autoresearch-core-flaws` carries the detached-job / fan-out / `inherit_profile` fixes (**PR #11 → `nicoechaniz/main`**, open). |
 | metric-aware `/goal` | `hermes_cli/goals.py`, `hermes_cli/cli_commands_mixin.py`, `gateway/slash_commands.py` | Extends Nous's `/goal` (Ralph-style loop) with an optional `metric:` tail + deterministic verdict bypass. Wired into the relocated mixin handlers. |
 
 Consumed from Nico (do not re-implement — they ride in via the base): `feat/kimi`,
@@ -159,13 +159,18 @@ learned the hard way:
   integration, or opening a PR: `git fetch nicoechaniz upstream` and re-check the tip.
   Building on a stale `nicoechaniz/main` silently bakes in divergence you then have to
   unwind.
-- **Your upstreamed features ride in from the base — stop carrying them.** When something
-  Fede originated lands in `nicoechaniz/main` (AutoResearch did, as the distilled commit
-  `0f6120146`), it is no longer your delta: the next sync inherits it for free. Before
-  rebuilding the integration, `git log nicoechaniz/main` (and read his CHANGELOG) for your
-  own features and **drop the feature branches that are now upstream** — re-carrying them
-  just recreates conflicts. The fork delta should only ever shrink toward "nothing but
-  config".
+- **Your upstreamed features ride in from the base — but re-verify, don't assume once and
+  forget.** When something Fede originated lands in `nicoechaniz/main` (AutoResearch did,
+  as the distilled commit `0f6120146`, 2026-06-14) it stops being your delta for that sync
+  — but Nico's fork has since shown it will do full history rewrites (e.g. the 2026-08
+  daemoncraft-lane normalize + rebuild), and a feature that rode in once can be **dropped**
+  in a later rebuild without notice (AutoResearch was — confirmed gone from his main as of
+  2026-08-06, despite this file having said otherwise). Before rebuilding the integration,
+  don't just check `git log nicoechaniz/main` for your commit hash — check the *content* is
+  still there (`git show nicoechaniz/main:<path>` for the files your delta touches), then
+  drop the feature branch only if it actually still rides in. The fork delta should shrink
+  toward "nothing but config" only as long as each drop is re-verified every sync, not
+  assumed permanent.
 - **How Nico signals a release.** His `CHANGELOG.md` top section is the canonical notice —
   it carries a *"TL;DR for team members on older agents"* plus the exact update steps
   (`hermes update` in `~/.hermes/hermes-agent`). He mirrors it for agents that consult
