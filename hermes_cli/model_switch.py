@@ -2236,6 +2236,16 @@ def list_authenticated_providers(
             model_ids = curated.get(hermes_id, [])
             if hermes_id in _MODELS_DEV_PREFERRED:
                 model_ids = _merge_with_models_dev(hermes_id, model_ids)
+        # Kimi Code's official CLI is the source of truth for Coding-plan
+        # aliases. Read its local catalog on every picker build so changes to
+        # ~/.kimi-code/config.toml appear without a Hermes release.
+        if hermes_id in {"kimi-coding", "kimi-coding-cn"}:
+            from hermes_cli.models import kimi_cli_model_ids
+
+            cli_models = kimi_cli_model_ids()
+            model_ids = cli_models or list(
+                dict.fromkeys([*curated.get(hermes_id, []), *model_ids])
+            )
         # A providers.<built-in>.models block extends the provider's discovered
         # catalog. Section 3 cannot emit it later because this built-in row owns
         # the slug, so merge declarations here before applying max_models.

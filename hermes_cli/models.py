@@ -345,6 +345,9 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "minimaxai/minimax-m3",
     ],
     "kimi-coding": [
+        # Kimi Code 0.34.0 exposes these exact wire ids.
+        "k3-256k",
+        "k3",
         "kimi-k3",
         "kimi-k2.7-code",
         "kimi-k2.6",
@@ -357,6 +360,8 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "kimi-k2-0905-preview",
     ],
     "kimi-coding-cn": [
+        "k3-256k",
+        "k3",
         "kimi-k3",
         "kimi-k2.7-code",
         "kimi-k2.7-code-highspeed",
@@ -2797,6 +2802,88 @@ def _openai_discovery_base_url(provider: str) -> str:
     return "https://api.openai.com/v1"
 
 
+def _is_kimi_coding_endpoint(base_url: str) -> bool:
+    """Return whether *base_url* is the official Kimi Code endpoint."""
+    try:
+        parsed = urllib.parse.urlparse((base_url or "").strip().rstrip("/"))
+    except Exception:
+        return False
+    return (
+        parsed.scheme.lower() == "https"
+        and (parsed.hostname or "").lower() == "api.kimi.com"
+        and parsed.port in (None, 443)
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.path.rstrip("/") in {"/coding", "/coding/v1"}
+        and not parsed.query
+        and not parsed.fragment
+    )
+
+
+def kimi_cli_model_ids() -> list[str]:
+    """Read the current model IDs and order from the official Kimi CLI.
+
+    Kimi Code keeps the authoritative Coding-plan aliases in its local
+    ``config.toml``. Reading that file avoids a second, drifting model catalog
+    in Hermes. The default model is placed first, matching the official CLI's
+    selection order. Values are wire IDs only; the ``kimi-code/`` alias prefix
+    is not sent to the API.
+    """
+    homes: list[Path] = []
+    configured_home = os.getenv("KIMI_CODE_HOME", "").strip()
+    if configured_home:
+        homes.append(Path(configured_home).expanduser())
+    homes.extend([Path.home() / ".kimi-code", Path.home() / ".kimi"])
+
+    try:
+        import tomllib
+    except ImportError:  # pragma: no cover - Python 3.11+ is required
+        return []
+
+    for home in dict.fromkeys(homes):
+        config_path = home / "config.toml"
+        if not config_path.exists():
+            continue
+        try:
+            config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        models = config.get("models")
+        if not isinstance(models, dict):
+            continue
+        default_key = config.get("default_model")
+        ordered_keys = ([default_key] if isinstance(default_key, str) else []) + [
+            key for key in models if key != default_key
+        ]
+        result: list[str] = []
+        seen: set[str] = set()
+        for key in ordered_keys:
+            entry = models.get(key)
+            if not isinstance(entry, dict) or entry.get("provider") != "managed:kimi-code":
+                continue
+            model_id = str(entry.get("model") or "").strip()
+            if model_id and model_id.lower() not in seen:
+                result.append(model_id)
+                seen.add(model_id.lower())
+        if result:
+            return result
+    return []
+
+
+_KIMI_CODE_ONLY_MODEL_IDS = frozenset({
+    "k3",
+    "k3-256k",
+    "kimi-for-coding",
+    "kimi-for-coding-highspeed",
+})
+
+
+def _filter_kimi_legacy_model_ids(model_ids: list[str], base_url: str) -> list[str]:
+    if _is_kimi_coding_endpoint(base_url):
+        return model_ids
+    return [model for model in model_ids if model.lower() not in _KIMI_CODE_ONLY_MODEL_IDS]
+
+
 def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) -> list[str]:
     """Return the best known model catalog for a provider.
 
@@ -2807,6 +2894,22 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
     on the platform appear in ``/model`` without a Hermes release.
     """
     normalized = normalize_provider(provider)
+    kimi_base_url = ""
+    if normalized in {"kimi-coding", "kimi-coding-cn"}:
+        cli_models = kimi_cli_model_ids()
+        configured_base_url = os.getenv("KIMI_BASE_URL", "").strip()
+        try:
+            from hermes_cli.auth import resolve_api_key_provider_credentials
+
+            kimi_credentials = resolve_api_key_provider_credentials(normalized)
+            kimi_base_url = str(kimi_credentials.get("base_url") or "").strip()
+        except Exception:
+            if cli_models and not configured_base_url:
+                return cli_models
+        if configured_base_url and not kimi_base_url:
+            kimi_base_url = configured_base_url
+        if _is_kimi_coding_endpoint(kimi_base_url) and cli_models:
+            return cli_models
     if normalized == "openrouter":
         return model_ids(force_refresh=force_refresh)
     if normalized == "openai-codex":
@@ -3034,6 +3137,8 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
                             if _model_dedup_key(m) not in merged_lower:
                                 merged.append(m)
                                 merged_lower.add(_model_dedup_key(m))
+                        if normalized in {"kimi-coding", "kimi-coding-cn"}:
+                            merged = _filter_kimi_legacy_model_ids(merged, base_url)
                         return merged
                     return live
             # Use profile's fallback_models if defined
@@ -3045,6 +3150,8 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
     curated_static = list(_PROVIDER_MODELS.get(normalized, []))
     if normalized in _MODELS_DEV_PREFERRED:
         return _merge_with_models_dev(normalized, curated_static)
+    if normalized in {"kimi-coding", "kimi-coding-cn"}:
+        curated_static = _filter_kimi_legacy_model_ids(curated_static, kimi_base_url)
     return curated_static
 
 

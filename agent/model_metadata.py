@@ -426,11 +426,10 @@ DEFAULT_CONTEXT_LENGTHS = {
     "grok-3": 131072,           # grok-3, grok-3-mini, grok-3-fast, grok-3-mini-fast
     "grok-2": 131072,           # grok-2, grok-2-1212, grok-2-latest
     "grok": 131072,             # catch-all (grok-beta, unknown grok-*)
-    # Kimi — K3 ships with a 1 Mi context window (1,048,576; verified against
-    # models.dev and OpenRouter live metadata, matching the endpoint-scoped
-    # override in _endpoint_scoped_context_length). Longest-key-first substring
-    # matching ensures "kimi-k3" resolves to 1M while older/unknown Kimi models
-    # still hit the generic 256K fallback.
+    # Kimi Code exposes both K3 (1 Mi) and K3-256k (256 Ki) wire ids. Keep the
+    # more specific key first so substring matching never assigns K3's 1 Mi
+    # window to the 256k variant.
+    "k3-256k": 262144,
     "kimi-k3": 1_048_576,
     "kimi": 262144,
     "kimi-k2.6": 262144,
@@ -667,10 +666,10 @@ def _is_known_provider_base_url(base_url: str) -> bool:
 def _endpoint_scoped_context_length(model: str, base_url: str) -> Optional[int]:
     """Return context metadata confirmed for one provider endpoint.
 
-    Kimi Coding serves K3 under the bare slug ``k3``, but users may also
-    configure or select the public-facing aliases ``kimi-k3`` and
+    Kimi Coding serves K3 under the bare slugs ``k3`` and ``k3-256k``; users
+    may also configure or select the public-facing aliases ``kimi-k3`` and
     ``kimi-k3-cot``. Only canonical ``https://api.kimi.com/coding`` endpoints
-    (legacy Moonshot keys do not serve K3) get the 1 Mi context window.
+    (legacy Moonshot keys do not serve K3) get endpoint-specific metadata.
 
     NVIDIA NIM serves ``deepseek-ai/deepseek-v4-pro`` with a 262,144-token
     window even though DeepSeek's native endpoint serves the V4 family with a
@@ -695,6 +694,18 @@ def _endpoint_scoped_context_length(model: str, base_url: str) -> Optional[int]:
         and model.strip().lower() in {"k3", "kimi-k3", "kimi-k3-cot"}
     ):
         return 1_048_576
+    if (
+        parsed.scheme.lower() == "https"
+        and (parsed.hostname or "").lower() == "api.kimi.com"
+        and port in (None, 443)
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.path.rstrip("/") in {"/coding", "/coding/v1"}
+        and not parsed.query
+        and not parsed.fragment
+        and model.strip().lower() == "k3-256k"
+    ):
+        return 262_144
     if (
         parsed.scheme.lower() == "https"
         and (parsed.hostname or "").lower() == "integrate.api.nvidia.com"
@@ -2794,14 +2805,7 @@ def get_model_context_length(
                 _maybe_cache_local_context_length(model, base_url, local_ctx)
             return local_ctx
 
-    # 8. Provider-scoped hardcoded defaults. Kimi Code accepts the short
-    # ``k3`` alias while its catalog uses the fully qualified ``kimi-k3``
-    # identifier. Keep this scoped to Kimi: a generic "k3" substring fallback
-    # could misidentify unrelated providers' model IDs.
-    if effective_provider in {"kimi-for-coding", "kimi-coding", "kimi-coding-cn"} and model.lower() == "k3":
-        return 1_048_576
-
-    # 9. Hardcoded defaults (fuzzy match — longest key first for specificity)
+    # 8. Hardcoded defaults (fuzzy match — longest key first for specificity)
     # Only check `default_model in model` (is the key a substring of the input).
     # The reverse (`model in default_model`) causes shorter names like
     # "claude-sonnet-4" to incorrectly match "claude-sonnet-4-6" and return 1M.

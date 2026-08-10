@@ -272,6 +272,9 @@ class TestDefaultContextLengths:
                     assert get_model_context_length(
                         model, provider="kimi-coding", base_url=base_url
                     ) == 1_048_576
+                assert get_model_context_length(
+                    "k3-256k", provider="kimi-coding", base_url=base_url
+                ) == 262_144
 
             for base_url in rejected_urls:
                 # Bare slug: endpoint-scoped, must NOT leak off-endpoint.

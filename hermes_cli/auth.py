@@ -810,6 +810,122 @@ def kimi_coding_default_headers() -> Dict[str, str]:
     return headers
 
 
+def kimi_coding_compatibility_report() -> Dict[str, Any]:
+    """Inspect the local Kimi Code contract without making a model request.
+
+    Kimi Code is an external moving target: its CLI can migrate the credential
+    store, change the OAuth payload, or alter the client identity expected by
+    the Coding endpoint.  Keep this check local and side-effect free so it can
+    run automatically before Hermes consumes the credentials.  A separate
+    operator-invoked live probe can test the endpoint without spending model
+    tokens.
+
+    The report intentionally contains metadata only.  Token values and device
+    identifiers are never returned.
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+    credential_path = _kimi_cli_credentials_path()
+    observed: Dict[str, Any] = {
+        "credential_path": str(credential_path),
+        "endpoint": KIMI_CODE_BASE_URL,
+    }
+
+    if not credential_path.exists():
+        errors.append("Kimi CLI credential file is missing.")
+        return {"ok": False, "errors": errors, "warnings": warnings, "observed": observed}
+
+    try:
+        credentials = json.loads(credential_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        errors.append(f"Kimi CLI credential file is not valid JSON: {type(exc).__name__}.")
+        return {"ok": False, "errors": errors, "warnings": warnings, "observed": observed}
+
+    if not isinstance(credentials, dict):
+        errors.append("Kimi CLI credential payload is not an object.")
+        return {"ok": False, "errors": errors, "warnings": warnings, "observed": observed}
+
+    observed["credential_keys"] = sorted(str(key) for key in credentials)
+    observed["has_access_token"] = bool(str(credentials.get("access_token", "") or "").strip())
+    observed["has_refresh_token"] = bool(str(credentials.get("refresh_token", "") or "").strip())
+    if not observed["has_access_token"] and not observed["has_refresh_token"]:
+        errors.append("Kimi CLI credentials contain neither access_token nor refresh_token.")
+
+    expires_at = credentials.get("expires_at")
+    if expires_at is not None:
+        try:
+            observed["token_expired"] = _kimi_oauth_token_is_expired(expires_at, skew_seconds=0)
+        except Exception:
+            errors.append("Kimi CLI expires_at is not numeric.")
+    else:
+        warnings.append("Kimi CLI credentials have no expires_at; refresh behavior cannot be preflighted.")
+
+    device_path = _kimi_cli_device_id_path()
+    device_id = ""
+    if device_path.exists():
+        try:
+            device_id = device_path.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+    observed["device_path"] = str(device_path)
+    observed["device_id_present"] = bool(device_id)
+    if not device_id:
+        errors.append("Kimi CLI device_id is missing; Kimi Coding headers cannot identify this client.")
+
+    version = _kimi_cli_version()
+    headers = kimi_coding_default_headers()
+    observed["cli_version"] = version
+    observed["header_names"] = sorted(headers)
+    required_headers = {
+        "User-Agent",
+        "X-Msh-Platform",
+        "X-Msh-Version",
+        "X-Msh-Device-Name",
+        "X-Msh-Device-Model",
+        "X-Msh-Os-Version",
+        "X-Msh-Device-Id",
+    }
+    missing_headers = sorted(required_headers.difference(headers))
+    if missing_headers:
+        errors.append(f"Kimi Coding headers missing: {', '.join(missing_headers)}.")
+    if not str(headers.get("User-Agent", "")).startswith(f"{KIMI_CODE_CLI_USER_AGENT}/"):
+        errors.append("Kimi Coding User-Agent no longer mirrors the official CLI identity.")
+    if headers.get("X-Msh-Platform") != "kimi_cli":
+        errors.append("Kimi Coding X-Msh-Platform is not kimi_cli.")
+    if headers.get("X-Msh-Version") != version:
+        errors.append("Kimi Coding X-Msh-Version does not match the installed CLI version.")
+
+    config_candidates = [
+        credential_path.parent.parent / "config.toml",
+        credential_path.parent.parent.parent / ".kimi-code" / "config.toml",
+        credential_path.parent.parent.parent / ".kimi" / "config.toml",
+    ]
+    config_path = next((path for path in config_candidates if path.exists()), None)
+    if config_path is None:
+        warnings.append("Kimi CLI config.toml was not found; model and parameter metadata were not checked.")
+    else:
+        observed["config_path"] = str(config_path)
+        try:
+            import tomllib
+
+            config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+            configured_models = config.get("models", {})
+            default_model = config.get("default_model")
+            model_config = configured_models.get(default_model, {}) if isinstance(configured_models, dict) else {}
+            observed["configured_default_model"] = default_model
+            observed["configured_model_ids"] = sorted(configured_models) if isinstance(configured_models, dict) else []
+            if isinstance(model_config, dict):
+                observed["configured_model"] = model_config.get("model")
+                observed["configured_max_context_size"] = model_config.get("max_context_size")
+                observed["configured_capabilities"] = model_config.get("capabilities")
+            else:
+                warnings.append("Kimi CLI coding model metadata is missing or has changed shape.")
+        except Exception as exc:
+            errors.append(f"Kimi CLI config.toml could not be parsed: {type(exc).__name__}.")
+
+    return {"ok": not errors, "errors": errors, "warnings": warnings, "observed": observed}
+
+
 def resolve_kimi_coding_runtime_credentials(
     *,
     prefer_cli_oauth: bool = True,
@@ -822,6 +938,16 @@ def resolve_kimi_coding_runtime_credentials(
         base_url = KIMI_CODE_BASE_URL
 
     if prefer_cli_oauth:
+        if _kimi_cli_credentials_path().exists():
+            compatibility = kimi_coding_compatibility_report()
+            if not compatibility["ok"]:
+                details = "; ".join(compatibility["errors"])
+                raise AuthError(
+                    f"Kimi CLI compatibility preflight failed: {details} Run `kimi doctor` or `kimi login`.",
+                    provider="kimi-coding",
+                    code="kimi_cli_incompatible",
+                    relogin_required=False,
+                )
         try:
             creds = _read_kimi_cli_credentials()
             access_token = str(creds.get("access_token", "") or "").strip()

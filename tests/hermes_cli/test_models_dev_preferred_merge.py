@@ -48,6 +48,32 @@ class TestMergeHelper:
 
 class TestProviderModelIdsPreferred:
 
+    def test_kimi_catalog_comes_from_official_cli_config(self, tmp_path, monkeypatch):
+        config_home = tmp_path / ".kimi-code"
+        config_home.mkdir()
+        (config_home / "config.toml").write_text(
+            """default_model = "kimi-code/k3-256k"
+
+[models."kimi-code/k3-256k"]
+provider = "managed:kimi-code"
+model = "k3-256k"
+
+[models."kimi-code/k3"]
+provider = "managed:kimi-code"
+model = "k3"
+
+[models."kimi-code/other"]
+provider = "other"
+model = "other"
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("KIMI_CODE_HOME", str(config_home))
+
+        from hermes_cli.models import kimi_cli_model_ids
+
+        assert kimi_cli_model_ids() == ["k3-256k", "k3"]
+
 
 
 
@@ -105,10 +131,10 @@ class TestProviderModelIdsPreferred:
             ):
                 custom_models = provider_model_ids("kimi-coding")
 
-        # The live bare wire id ``k3`` folds into the curated public slug
-        # ``kimi-k3`` (picker alias dedup) — one row, curated slug leads.
-        assert coding_models[0] == "kimi-k3"
-        assert all(model.lower() != "k3" for model in coding_models)
+        # Kimi Code's curated floor leads with the exact current wire id;
+        # live discovery may still report the shorter ``k3`` alias, which
+        # remains endpoint-scoped and is not exposed by legacy endpoints.
+        assert coding_models[0] == "k3-256k"
         assert all(model.lower() != "k3" for model in legacy_models)
         assert all(model.lower() != "k3" for model in custom_models)
         # Legacy / custom endpoints never advertise the k3 family at all
@@ -133,7 +159,7 @@ class TestProviderModelIdsPreferred:
             _model_flow_kimi({}, current_model="")
 
         assert captured["models"] == _PROVIDER_MODELS["kimi-coding"]
-        assert captured["models"][0] == "kimi-k3"
+        assert captured["models"][0] == "k3-256k"
 
     def test_kimi_setup_flow_uses_cli_oauth_without_api_key_prompt(self):
         """Kimi CLI OAuth should enter model selection without asking for KIMI_API_KEY."""

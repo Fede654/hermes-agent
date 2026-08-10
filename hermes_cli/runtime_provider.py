@@ -100,6 +100,19 @@ def _config_base_url_trustworthy_for_bare_custom(cfg_base_url: str, cfg_provider
     return _loopback_hostname(base_url_hostname(bu))
 
 
+def _oauth_derived_base_url_conflicts(cfg_base_url: str, creds_base_url: str) -> bool:
+    """True when a config ``model.base_url`` conflicts with a credential-derived URL.
+
+    OAuth-managed credentials carry an authoritative base_url: the access
+    token is only valid on that host. A config value pointing at a different
+    host is almost always a stale leftover from a previous provider era
+    (same bug class as GitHub #14676), not a deliberate override.
+    """
+    cfg_host = (base_url_hostname(cfg_base_url) or "").lower()
+    creds_host = (base_url_hostname(creds_base_url) or "").lower()
+    return bool(cfg_host and creds_host and cfg_host != creds_host)
+
+
 def _detect_api_mode_for_url(base_url: str) -> Optional[str]:
     """Auto-detect api_mode from the resolved base URL.
 
@@ -2262,6 +2275,30 @@ def resolve_runtime_provider(
         cfg_base_url = ""
         if cfg_provider == provider:
             cfg_base_url = (model_cfg.get("base_url") or "").strip().rstrip("/")
+            # kimi-coding OAuth credentials are only valid on the credential-
+            # derived host (api.kimi.com): a config model.base_url pointing
+            # elsewhere is a stale cross-provider leftover (e.g. an old
+            # openai-codex URL), not a deliberate override — it sends the
+            # OAuth token to the wrong host and every fresh agent's first
+            # call 401s until the credential-refresh path rebuilds the
+            # client. Drop it with a warning. Static API keys keep
+            # config-wins: there the user picks the endpoint deliberately.
+            if (
+                provider == "kimi-coding"
+                and str(creds.get("source") or "").startswith("kimi-cli-oauth")
+                and _oauth_derived_base_url_conflicts(
+                    cfg_base_url, str(creds.get("base_url") or "")
+                )
+            ):
+                logger.warning(
+                    "Ignoring stale model.base_url %r: kimi-coding OAuth "
+                    "credentials are only valid on %s. Remove model.base_url "
+                    "from config.yaml or point it at the Kimi endpoint.",
+                    cfg_base_url,
+                    base_url_hostname(str(creds.get("base_url") or ""))
+                    or "the OAuth endpoint",
+                )
+                cfg_base_url = ""
         base_url = cfg_base_url or creds.get("base_url", "").rstrip("/")
         api_mode = "chat_completions"
         if provider == "copilot":
