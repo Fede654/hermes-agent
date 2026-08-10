@@ -19,7 +19,7 @@ NousResearch/hermes-agent   (upstream — canonical Hermes)
         ▼
 nicoechaniz/hermes-agent    (Nico's fork — adds kimi, daemoncraft, minimax,
         │                     kanban-review, altermundi; syncs upstream)
-        │  PRs flow back up (sync, fixes)
+        │  (one-way since 2026-08-10 — we merge from him, no PRs back)
         ▼
 Fede654/hermes-agent        (this fork — adds autoresearch + metric-aware /goal;
                               replicates to N agents via canonical tags)
@@ -27,8 +27,9 @@ Fede654/hermes-agent        (this fork — adds autoresearch + metric-aware /goa
 
 ## Operating principles
 
-This is an **active collaboration with Nico and a close track of upstream Nous**,
-not a long-lived divergent fork. Everything below serves that:
+This fork **consumes from Nico and tracks upstream Nous closely** — one-way since
+2026-08-10. The goal is to never fall behind the development rhythm, not to feed
+work back. Everything below serves that:
 
 - **Track Nous closely, sync small and often.** Frequent small rebases beat rare
   giant ones — the god-file refactors (authz/model-flow/cli extractions) are far
@@ -37,14 +38,18 @@ not a long-lived divergent fork. Everything below serves that:
 - **Base on `nicoechaniz/main`, not Nous directly.** Nico's main already carries
   the shared canonical features (kimi, daemoncraft, …) and his own upstream sync.
   Basing there means Fede maintains only his *own* delta (autoresearch + `/goal`)
-  and inherits the rest for free. Fede helps keep Nico current via sync PRs — that
-  loop *is* how this fork tracks Nous.
-- **Keep Fede's delta minimal and upstreamable.** Provider-neutral, no hardcoded
-  models, clean over the base. Anything that could live in Nico's fork should go
-  there via PR, not accrete here.
-- **Push everything up promptly.** Sync PRs and autoresearch fixes flow back to
-  Nico as soon as they're validated, so the shared core never drifts from what
-  Fede actually runs.
+  and inherits the rest for free. Nico does his own upstream syncs; we ride them.
+  When he lags Nous badly, merge `upstream/main` here directly instead of waiting.
+- **Keep Fede's delta clean over the base.** Provider-neutral, no hardcoded
+  models, minimal surface. Not because it will be upstreamed — it won't — but
+  because a clean delta is what makes each merge from Nico cheap.
+- **Consume from Nico; don't push upstream.** *(policy change 2026-08-10.)* The
+  fork now runs **one-way**: we take whatever is valuable from `nicoechaniz/main`
+  on a cadence and keep our own delta local. Upstreaming cost more than it
+  returned — PRs #11/#12/#13 sat open ~2 months while his main moved 8k commits,
+  and #11's target (autoresearch) was dropped from his fork entirely. All three
+  were closed on 2026-08-10. Fixes we need live in our integration; if Nico wants
+  one he can take it from `feat/integration`.
 
 ## Branch / remote roles
 
@@ -61,11 +66,11 @@ not a long-lived divergent fork. Everything below serves that:
 
 ## Current canonical features
 
-Fede-originated (also flow upstream to Nico via PR):
+Fede-originated (ours to maintain; no longer offered upstream):
 
 | Feature | Where it lives | Notes |
 |---------|----------------|-------|
-| autoresearch | `agent/research/`, `tools/research_tool.py`, `tools/research_job_tool.py` | Provider-neutral. Landed in `nicoechaniz/main` once (distilled commit `0f6120146`, 2026-06-14) but **is no longer there** — verified 2026-08-06 that Nico's `feat/autoresearch` is frozen at the same commit as his own `backup/autoresearch-pre-v014`, meaning he dropped it during a later history rebuild. Back to being Fede's full delta; do **not** assume it rides in from the base without re-checking each sync. Fede's `fix/autoresearch-core-flaws` carries the detached-job / fan-out / `inherit_profile` fixes (**PR #11 → `nicoechaniz/main`**, open). |
+| autoresearch | `agent/research/`, `tools/research_tool.py`, `tools/research_job_tool.py` | Provider-neutral. Landed in `nicoechaniz/main` once (distilled commit `0f6120146`, 2026-06-14) but **is no longer there** — verified 2026-08-06 that Nico's `feat/autoresearch` is frozen at the same commit as his own `backup/autoresearch-pre-v014`, meaning he dropped it during a later history rebuild. Back to being Fede's full delta; do **not** assume it rides in from the base without re-checking each sync. Fede's `fix/autoresearch-core-flaws` carries the detached-job / fan-out / `inherit_profile` fixes (PR #11 to Nico closed 2026-08-10; the fixes live only here now). |
 | metric-aware `/goal` | `hermes_cli/goals.py`, `hermes_cli/cli_commands_mixin.py`, `gateway/slash_commands.py` | Extends Nous's `/goal` (Ralph-style loop) with an optional `metric:` tail + deterministic verdict bypass. Wired into the relocated mixin handlers. |
 
 Consumed from Nico (do not re-implement — they ride in via the base): `feat/kimi`,
@@ -77,7 +82,7 @@ Consumed from Nico (do not re-implement — they ride in via the base): `feat/ki
 1. Confirm remotes: `git remote -v` (expect `upstream`, `nicoechaniz`, `fede654`).
 2. Refresh the base mirror. Default base is `nicoechaniz/main` (inherits Nico's
    features + his upstream sync). Use `upstream/main` directly only when racing
-   ahead of Nico — and then open the sync PR so he catches up:
+   ahead of Nico when his fork lags Nous:
    ```bash
    git fetch upstream nicoechaniz
    git checkout nousmain && git reset --hard nicoechaniz/main   # or upstream/main
@@ -132,22 +137,31 @@ rollback pin.
 4. Keep the previous integration branch as the rollback ref until the new tag is
    confirmed healthy on every agent.
 
-## Upstream collaboration (PRs to Nico)
+## Upstream collaboration (retired 2026-08-10)
 
-Fede's work flows back up so the fork doesn't diverge silently:
+**This fork no longer opens PRs to Nico.** PRs #11 (autoresearch fixes), #12
+(streaming/tool-call fragmentation) and #13 (main lint debt) were closed on
+2026-08-10; only #6 (embodied_plan, May) remains open from the old era. The
+relationship is now **consume-only**: `nicoechaniz/main` is a source we merge
+from, not a destination we push to.
 
-- **Sync** (`sync/upstream-<date>` → `nicoechaniz/main`): advances Nico's fork to a
-  newer upstream. Merge, not rebuild, matching his "Merge branch 'nousmain'" style.
-- **Fixes** (`fix/autoresearch-core-flaws` → `nicoechaniz/main`): bugfixes to the shared
-  autoresearch core. Originally targeted `feat/autoresearch-core-v014`; **retargeted to
-  `main` once Nico merged the core there** (the `agent/research/*.py` files are
-  byte-identical between the v014 extraction and main, so the fix commits cherry-pick clean
-  — drop the now-upstream "restore core" commit and carry only the fixes).
-- **Standalone core fixes** (e.g. `fix/streaming-toolcall-fragmentation` → `nicoechaniz/main`):
-  provider-neutral bugfixes in shared/upstream code go straight to Nico's main as their
-  own PR, then ride back down into our integration on the next sync.
+What this changes in practice:
 
-## Tracking Nico — the collaboration loop (read before any sync or PR)
+- No `sync/upstream-<date>` branch, no PR-hygiene ritual (author re-writing to
+  the GitHub noreply identity, reading his CI, `gh api -X PATCH` workarounds).
+  All of that only mattered for PRs; it is dead weight now.
+- Fixes we need — including ones in shared/upstream code — land directly in our
+  integration and stay there. If Nico wants one, he can cherry-pick from
+  `feat/integration`.
+- Our delta will grow rather than shrink. Accept that; the cadence discipline
+  below (merge often, small) is what keeps it cheap, not upstreaming.
+- If Nico's fork ever goes quiet, the fallback base is `upstream/main` (Nous)
+  directly — the merge mechanics are identical.
+
+The historical PR-hygiene notes are preserved in `canonical-2026-08-06`'s copy of
+this file if the loop is ever reopened.
+
+## Tracking Nico — the consume loop (read before any sync)
 
 This fork lives **downstream of Nico** and tracks him closely. The lived discipline,
 learned the hard way:
@@ -156,7 +170,7 @@ learned the hard way:
   Nico syncs upstream in big batches (one sync landed **851 commits / the v0.16.0
   release** while a local ref still pointed at a 7-day-old base, so a whole afternoon of
   work got built on an already-superseded base). Before basing a branch, rebuilding the
-  integration, or opening a PR: `git fetch nicoechaniz upstream` and re-check the tip.
+  integration: `git fetch nicoechaniz upstream` and re-check the tip.
   Building on a stale `nicoechaniz/main` silently bakes in divergence you then have to
   unwind.
 - **Your upstreamed features ride in from the base — but re-verify, don't assume once and
@@ -184,46 +198,26 @@ learned the hard way:
   `canonical-<date>` → every deployed agent `git fetch fede654 && git checkout
   feat/integration` (or `hermes update`) + `pip install -e .` + restart its gateway.
 
-## PR hygiene & reading Nico's CI (learned 2026-06-15)
+## Triaging test failures during a sync (the surviving half of the old PR notes)
 
-Opening PRs to Nico has two recurring traps. Both cost a full review cycle the
-first time; neither is about your code.
+Nico's `main` accumulates broken tests — nothing gates pushes to it except
+Typecheck/Nix/OSV, so the full suite is never green there. When a rebuilt
+integration shows red, establish *whose* red it is before chasing it:
 
-- **Re-author CT-made commits to your GitHub identity before the PR.** Commits
-  authored on a deployed agent's container carry that box's git identity
-  (Chiwa commits as `dev@chiwa.dev`). Nico's `contributor-check` workflow greps
-  every PR-commit author email against `scripts/release.py` AUTHOR_MAP and fails
-  on anything that is neither mapped **nor** a GitHub noreply
-  (`<id>+user@users.noreply.github.com`). Fix without touching his `release.py`:
-  re-author onto your canonical noreply identity, content-identical —
-  ```bash
-  git rebase nicoechaniz/main \
-    --exec 'git commit --amend --no-edit --reset-author'   # with GIT_AUTHOR_*=<id>+Fede654@users.noreply.github.com
-  ```
-  Verify the tree is unchanged (`git rev-parse <new>^{tree}` == old) before the
-  force-push. `buzondefede@gmail.com` is **not** in AUTHOR_MAP either — only the
-  noreply form clears the gate, so route *all* PR commits through it.
-- **Most red CI on your PR is Nico's main, not your diff.** The blocking checks
-  `ruff enforcement`, `Windows footguns`, and the full `test (N/6)` matrix run
-  `ruff check .` / `--all` / the whole suite — **whole-repo**, and **none of them
-  gate pushes to `main`** (main only runs Typecheck/Nix/OSV). So `main` silently
-  accumulates lint debt and broken tests that turn *every* open PR red regardless
-  of its own change. Before assuming you broke something:
-  - The **diff-scoped** job `ruff + ty diff` reflects *your* change — if it's
-    green, your diff is clean.
-  - Reproduce the failure on **pristine `nicoechaniz/main`** (`git checkout
-    nicoechaniz/main && pytest <failing test>`). If it fails there too, it's
-    inherited — note it in the PR, don't chase it.
-  - Goodwill move that unblocks *everyone*: a tiny `fix/main-lint-debt` PR adding
-    `encoding="utf-8"` / `# windows-footgun: ok` to clear the whole-repo lint
-    gates (this is how PR #13 was born). Feature-test failures
-    (`embodied_plan`, `daemoncraft` checker, `mc_bit`, codex/copilot) are his
-    bugs — out of scope.
-- **Editing a PR on Nico's repo: use the API, not `gh pr edit`.** His repo trips
-  a `GraphQL: Projects (classic) … projectCards` deprecation that makes
-  `gh pr edit --base/--body` fail **silently** (returns the warning, changes
-  nothing). Use `gh api -X PATCH repos/nicoechaniz/hermes-agent/pulls/<N>
-  -f base=main -F body=@file.md` and re-read to confirm it took.
+- **Reproduce on pristine `nicoechaniz/main`** in a throwaway worktree
+  (`git worktree add --detach .worktrees/nico-check nicoechaniz/main`). If it
+  fails there too, it's inherited — note it and move on.
+- **Then reproduce on the previous `canonical-<date>`.** Failing there as well
+  means it predates this sync and is our own standing debt, not a merge
+  regression.
+- **Disable random ordering before believing a failure.** The suite runs under
+  `pytest-randomly`; several goal/wait-barrier tests are order-sensitive and
+  fail only in some seeds (this cost a full investigation on 2026-08-10). Re-run
+  with `-p no:randomly` to separate real breakage from ordering flake.
+- **Missing optional deps look like mass breakage.** ~50 collection errors under
+  `tests/acp*`, `tests/tools/test_mcp_*`, and the web-server tests are just
+  `acp` / `python-multipart` not installed in the venv — run `pip install -e .`
+  against the new base first, then judge.
 
 ## Verification checklist
 
