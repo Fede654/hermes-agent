@@ -14,6 +14,7 @@ import time
 
 from agent.redact import redact_sensitive_text
 from agent.secret_scope import get_secret
+from agent.send_audit import log_send_event
 
 logger = logging.getLogger(__name__)
 
@@ -355,6 +356,26 @@ def _handle_react(args, remove=False):
     return json.dumps({"success": bool(result)})
 
 
+def _session_chat_for(platform_name: str) -> str | None:
+    """Chat id of the current gateway session, if it is on ``platform_name``.
+
+    Used to resolve an untargeted send to the conversation actually in
+    progress. Returns ``None`` outside a gateway session (cron, CLI) or when
+    the session belongs to a different platform — in both cases the caller
+    falls back to the configured home channel.
+    """
+    try:
+        from gateway.session_context import get_session_env
+
+        current_platform = get_session_env("HERMES_SESSION_PLATFORM", "").strip().lower()
+        current_chat = get_session_env("HERMES_SESSION_CHAT_ID", "").strip()
+        if current_platform == platform_name and current_chat:
+            return current_chat
+    except Exception:
+        pass
+    return None
+
+
 def _handle_send(args):
     """Send a message to a platform target."""
     target = args.get("target", "")
@@ -445,6 +466,13 @@ def _handle_send(args):
 
     used_home_channel = False
     if not chat_id:
+        # No explicit target: prefer the chat this session is already talking
+        # in. Falling straight through to the home channel means a send issued
+        # while serving user A can surface in the home chat — a cross-chat
+        # leak. The home channel stays the fallback below.
+        chat_id = _session_chat_for(platform_name)
+
+    if not chat_id:
         home = config.get_home_channel(platform)
         if not home and platform_name == "weixin":
             wx_home = os.getenv("WEIXIN_HOME_CHANNEL", "").strip()
@@ -466,6 +494,18 @@ def _handle_send(args):
 
     duplicate_skip = _maybe_skip_cron_duplicate_send(platform_name, chat_id, thread_id)
     if duplicate_skip:
+        log_send_event(
+            platform=platform_name,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            content=cleaned_message,
+            media_files=media_files,
+            success=False,
+            error="skipped: cron auto-delivery duplicate",
+            message_id=None,
+            used_home_channel=used_home_channel,
+            target_specified=bool(target_ref),
+        )
         return json.dumps(duplicate_skip)
 
     # Slack: resolve user targets to DM channel IDs before sending.
@@ -520,10 +560,36 @@ def _handle_send(args):
             except Exception:
                 pass
 
+        if isinstance(result, dict):
+            log_send_event(
+                platform=platform_name,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                content=cleaned_message,
+                media_files=media_files,
+                success=result.get("success", False),
+                error=result.get("error"),
+                message_id=result.get("message_id"),
+                used_home_channel=used_home_channel,
+                target_specified=bool(target_ref),
+            )
+
         if isinstance(result, dict) and "error" in result:
             result["error"] = _sanitize_error_text(result["error"])
         return json.dumps(result)
     except Exception as e:
+        log_send_event(
+            platform=platform_name,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            content=cleaned_message,
+            media_files=media_files,
+            success=False,
+            error=str(e),
+            message_id=None,
+            used_home_channel=used_home_channel,
+            target_specified=bool(target_ref),
+        )
         return json.dumps(_error(f"Send failed: {e}"))
 
 
