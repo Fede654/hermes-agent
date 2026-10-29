@@ -206,6 +206,32 @@ def _handle_react(args, remove=False):
     return json.dumps(result if isinstance(result, dict) else {"success": bool(result)})
 
 
+def _session_chat_for(platform_name: str) -> str | None:
+    """Chat id of the current gateway session, if it is on ``platform_name``.
+
+    Used to resolve an untargeted send to the conversation actually in
+    progress. Returns ``None`` outside a gateway session (cron, CLI) or when
+    the session belongs to a different platform; the caller then falls back to
+    the configured home channel.
+    """
+    try:
+        from gateway.session_context import get_session_env
+    except ImportError:  # bare CLI / no gateway: nothing to resolve
+        return None
+    current_platform = get_session_env("HERMES_SESSION_PLATFORM", "").strip().lower()
+    current_chat = get_session_env("HERMES_SESSION_CHAT_ID", "").strip()
+    return current_chat if current_platform == platform_name and current_chat else None
+
+
+def _with_session_default(platform_name: str, chat_id):
+    """``chat_id`` if the caller gave one, else the current session's chat (``None`` -> home channel).
+
+    No explicit target must not fall straight through to the home channel: a send issued while serving
+    user A could surface in the home chat (cross-chat leak). The home channel stays the fallback.
+    """
+    return chat_id or _session_chat_for(platform_name) or chat_id
+
+
 def _handle_send(args):
     target, message = args.get("target", ""), args.get("message", "")
     if not target or not message:
@@ -241,6 +267,7 @@ def _handle_send(args):
     media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files, dropped=media_dropped)
     mirror_text = cleaned_message.strip() or _describe_media_for_mirror(media_files)
     target_specified = bool(chat_id)
+    chat_id = _with_session_default(platform_name, chat_id)
     used_home_channel = not chat_id
     if used_home_channel:
         chat_id, err = _home_chat_id(config, platform, platform_name)

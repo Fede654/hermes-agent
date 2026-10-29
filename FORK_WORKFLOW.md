@@ -33,6 +33,18 @@ The runtime base is NousResearch `v0.22.5`, commit
   outcome, message ID and up to 2,000 characters of content. Ordinary
   gateway replies that do not call `send_message` are outside its scope.
   Audit failures must not prevent delivery.
+- **Session-scoped untargeted sends.** `send_message` without an explicit
+  target resolves to the chat of the current gateway session when it is on the
+  same platform (`_session_chat_for` in `tools/send_message_tool.py`). The home
+  channel remains the fallback for cron, CLI and cross-platform sends. Without
+  this, a send issued while serving one user can surface in the home chat.
+- **Telegram observed group context.** The channel prompt for observed
+  (unmentioned) group messages tells the agent to treat them as first-class
+  recent memory, and observed group audio is transcribed
+  (`_transcribe_observed_audio`) so the transcript, not just the file path,
+  is kept. Transcription is best-effort and never blocks ingestion. Bot
+  self-message and bot-to-bot loop guards are upstream (`_is_own_message`,
+  `_bot_sender_suppressed`); do not re-add them.
 - **Canonical entry documents.** `AGENTS.md` holds repository instructions;
   `CLAUDE.md` is a relative symlink to that file.
 
@@ -54,6 +66,18 @@ Native summaries are imported once and retained on disk.
 Run `hermes memory bootstrap` to provision the current profile explicitly.
 An explicit choice of another provider is preserved by installer reruns.
 Configuration changes affect new sessions. See [HMK installation](HMK_MEMORY.md).
+
+## Deploying an agent
+
+`feat/integration` is the only deploy target. An agent is created with
+[`agent-provision`](https://github.com/Fede654/agent-provision), which pins this
+branch by **commit SHA** (or a `canonical-<date>` tag) and runs the Hermes
+installer in the container; the container envelope (network zone, storage,
+privileges) is defined by `pve-infra`. Never deploy from `main` (a mirror of Nous
+development, not a release) and never hand-patch a deployed checkout: a change
+goes through a PR to `feat/integration`, a new `canonical-<date>` tag, and a
+re-provision. Live patches that were found only in running containers are
+recorded in the commit that ports them.
 
 ## WhatsApp restricted-number configuration
 

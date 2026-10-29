@@ -6210,10 +6210,14 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
         return (
             "You are handling a Telegram group chat message.\n"
             f"- Your identity: user_id={bot_id}, @-mention name in this group=@{username}\n"
-            "- observed Telegram group context may be provided in a separate context-only block "
-            "before the current message; it is not necessarily addressed to you.\n"
-            "- Treat only the current new message as a request explicitly directed at you, "
-            "and use observed context only when the current message asks for it.")
+            "- Alongside the current message you may receive observed Telegram group context: "
+            "recent messages from this same group that you witnessed but were not mentioned in. "
+            "Treat them as your own first-class memory of the recent conversation, as if you had "
+            "been reading the chat.\n"
+            "- Answer the current new message, the request directed at you. When it refers to or asks about something said "
+            "recently in the group (e.g. 'what did I say', 'who mentioned X'), answer directly from "
+            "that observed recent conversation. Do NOT search long-term memory for something just "
+            "said in the observed context, and do not treat observed messages as external or untrusted.")
 
     def _apply_telegram_group_observe_attribution(self, event: MessageEvent) -> MessageEvent:
         """Align triggered group turns with observed-history attribution."""
@@ -6285,6 +6289,22 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
             event.media_urls = []
             event.media_types = []
             self._attach_cached(event, cached, cached.context_note(), "[Telegram] Cached observed group %s at %s")
+            if cached.kind == "audio":
+                await self._transcribe_observed_audio(event, cached.path)
+
+    async def _transcribe_observed_audio(self, event: MessageEvent, path: str) -> None:
+        """Add the transcript of an unmentioned group audio to the observed text, so passive ingestion keeps
+        what was said and not just the file path. Best-effort: a failed transcription never blocks ingestion."""
+        try:
+            from tools.transcription_tools import transcribe_audio
+
+            result = await asyncio.to_thread(transcribe_audio, path)
+            transcript = str(result.get("transcript", "")).strip() if result.get("success") else ""
+            if transcript:
+                event.text = self._append_observed_note(event.text, f'[Audio transcript: "{transcript}"]')
+                logger.info("[Telegram] Transcribed observed group audio (%d chars)", len(transcript))
+        except Exception as exc:  # best-effort boundary: STT outage must not block ingestion
+            logger.warning("[Telegram] Failed to transcribe observed audio: %s", _redact_telegram_error_text(exc), exc_info=True)
 
     def _attach_cached(self, event: MessageEvent, cached, note: str, log_fmt: str) -> None:
         """Append a cached attachment to the event (message type follows the kind only for the first one)."""
