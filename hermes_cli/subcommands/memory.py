@@ -16,13 +16,14 @@ def build_memory_parser(subparsers, *, cmd_memory: Callable) -> None:
             "Catalog providers (e.g. honcho, hindsight, supermemory,\n"
             "mem0, openviking, holographic): hermes plugins install <name>.\n\n"
             "Only one external provider can be active at a time.\n"
-            "Built-in memory (MEMORY.md/USER.md) is always active.")
+            "Built-in memory (MEMORY.md/USER.md) can be enabled independently.")
     memory_sub = memory_parser.add_subparsers(dest="memory_command")
     _setup_parser = memory_sub.add_parser(
         "setup", help="Interactive provider selection and configuration")
     _setup_parser.add_argument(
         "provider", nargs="?", default=None,
         help="Provider to configure directly (e.g. honcho), skipping the picker")
+    memory_sub.add_parser("bootstrap", help="Install and verify this fork's pinned default memory")
     memory_sub.add_parser("status", help="Show current memory provider config")
     memory_sub.add_parser("off", help="Disable external provider (built-in only)")
     _reset_parser = memory_sub.add_parser(
