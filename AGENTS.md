@@ -1,9 +1,8 @@
 # Hermes Agent - Development Guide
 
-For AI coding assistants and developers working on hermes-agent. This root file is a hub: what
-applies everywhere, then a routing table. Each area's `AGENTS.md` loads automatically when you work
-in that directory; read it before editing there. `python scripts/check` caps this file at 12k chars
-and every root-to-area chain at 30k, so it loads whole on 128k+ models: long form goes in the guide.
+Read the area's `AGENTS.md` before editing; it loads automatically. `scripts/check` caps this
+file at 12k chars and each root-to-area chain at 30k for full loading on 128k+ models.
+Long form belongs in the guide.
 
 **Never give up on the right solution.**
 
@@ -70,7 +69,7 @@ pulling to refresh the hook). `# noqa` does not waive a ratchet finding:
 
 ## Project Structure
 
-Counts shift constantly; the filesystem is canonical. Load-bearing entry points:
+The filesystem is canonical. Entry points:
 
 ```
 hermes-agent/
@@ -167,3 +166,9 @@ Every former god file is a **facade** (public entry points + the names other pac
 
 Long-form background: `website/docs/developer-guide/`. Workflow rules (PR/issue/review/salvage
 process) live in the `hermes-agent-dev` skill, not here.
+
+## Entry documents
+
+`AGENTS.md` is canonical and regular. `CLAUDE.md` and retained `agents.md` aliases
+are relative symlinks to it. Edit only the canonical file; preserve meaningful
+instructions, update references and keep append-only history when consolidating.

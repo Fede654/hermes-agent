@@ -8,6 +8,7 @@ import os
 import re
 
 from agent.secret_scope import get_secret
+from agent.send_audit import log_send_event, log_send_result
 
 logger = logging.getLogger(__name__)
 
@@ -239,12 +240,19 @@ def _handle_send(args):
     media_dropped: list = []
     media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files, dropped=media_dropped)
     mirror_text = cleaned_message.strip() or _describe_media_for_mirror(media_files)
+    target_specified = bool(chat_id)
     used_home_channel = not chat_id
     if used_home_channel:
         chat_id, err = _home_chat_id(config, platform, platform_name)
         if err:
             return tool_error(err)
     if duplicate_skip := _maybe_skip_cron_duplicate_send(platform_name, chat_id, thread_id):
+        log_send_event(
+            platform=platform_name, chat_id=chat_id, thread_id=thread_id,
+            content=cleaned_message, media_files=media_files, success=False,
+            error="skipped: cron auto-delivery duplicate", message_id=None,
+            used_home_channel=used_home_channel, target_specified=target_specified,
+        )
         return json.dumps(duplicate_skip)
     # Slack: resolve user targets to DM channel IDs before sending. _parse_target_ref emits internal
     # ``user:U...`` / ``user_name:@handle`` targets; a bare U... id can also arrive from session metadata or
@@ -296,8 +304,19 @@ def _handle_send(args):
             result["media_dropped"] = media_dropped
         if isinstance(result, dict) and "error" in result:
             result["error"] = _sanitize_error_text(result["error"])
+        log_send_result(
+            result, platform=platform_name, chat_id=chat_id, thread_id=thread_id,
+            content=cleaned_message, media_files=media_files,
+            used_home_channel=used_home_channel, target_specified=target_specified,
+        )
         return json.dumps(result)
     except Exception as e:
+        log_send_event(
+            platform=platform_name, chat_id=chat_id, thread_id=thread_id,
+            content=cleaned_message, media_files=media_files, success=False,
+            error=_sanitize_error_text(str(e)), message_id=None, used_home_channel=used_home_channel,
+            target_specified=target_specified,
+        )
         return json.dumps(_error(f"Send failed: {e}"))
 
 
