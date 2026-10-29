@@ -38,15 +38,22 @@ The runtime base is NousResearch `v0.22.5`, commit
 
 ## External memory provider
 
-[Fede's Hermes Memory Kit](https://github.com/Fede654/hermes-memory-kit)
-is configured as a standalone memory-provider plugin in each profile's
-Hermes home. It is not copied into this source tree.
+[Hermes Memory Kit](https://github.com/Fede654/hermes-memory-kit) is the default
+memory backend for this distribution. The Unix installer fetches only its
+`hermes_plugin/` runtime package at the exact commit in `fork-memory.json`,
+prepares dependencies through Hermes PM and validates SQLite plus local
+multilingual CPU embeddings before selecting it.
 
-The provider supplies automatic recall through `prefetch`, exposes no model
-memory tools and does not automatically persist turns. Durable writes use
-HMK's `memoryctl` commands. A configured embedding backend is required;
-HMK defaults to NVIDIA and supports a local `model2vec` configuration.
-Plugin discovery and live recall must be validated for each deployment.
+`remember` and `recall` provide deliberate writes and retrieval; `librarian`
+supports inspection, expansion, updates and deletion. Automatic recall uses
+Hermes' existing prefetch channel. Session-end and pre-compression extraction
+use the configured auxiliary model. Each profile owns its database at
+`<HERMES_HOME>/hmk-memory/library.db`; no process-wide HMK paths are used.
+Native summaries are imported once and retained on disk.
+
+Run `hermes memory bootstrap` to provision the current profile explicitly.
+An explicit choice of another provider is preserved by installer reruns.
+Configuration changes affect new sessions. See [HMK installation](HMK_MEMORY.md).
 
 ## WhatsApp restricted-number configuration
 

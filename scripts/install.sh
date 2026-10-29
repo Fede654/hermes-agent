@@ -20,8 +20,12 @@ set -u
 # hygiene can't break the locked sync the way it used to before pm owned it.
 export UV_NO_CONFIG=1
 
-REPO_URL="${HERMES_REPO_URL:-https://github.com/NousResearch/hermes-agent.git}"
+REPO_URL="${HERMES_REPO_URL:-https://github.com/Fede654/hermes-agent.git}"
 BRANCH="main"
+if [ "$REPO_URL" = "https://github.com/Fede654/hermes-agent.git" ]; then
+    BRANCH="feat/integration"
+fi
+BRANCH_EXPLICIT=false
 INSTALL_COMMIT=""
 # The update channel to install: stable (the latest published release, the default for the
 # official repository's main line) or main (every commit). An explicit choice is persisted.
@@ -52,7 +56,7 @@ while [ $# -gt 0 ]; do
                 exit 2
             fi
             case "$option" in
-                --branch|-Branch) BRANCH="$2" ;;
+                --branch|-Branch) BRANCH="$2"; BRANCH_EXPLICIT=true ;;
                 --commit|-Commit) INSTALL_COMMIT="$2" ;;
                 --channel|-Channel) CHANNEL="$2" ;;
                 --dir) INSTALL_DIR="$2" ;;
@@ -95,6 +99,14 @@ case "$CHANNEL" in
 esac
 
 INSTALL_DIR="${INSTALL_DIR:-$HERMES_HOME/hermes-agent}"
+# A repair without an explicit source/branch keeps a pre-existing non-fork checkout
+# on the upstream default. Fresh installs of this distribution use feat/integration.
+if [ "$BRANCH_EXPLICIT" = false ] && [ -z "${HERMES_REPO_URL:-}" ]; then
+    case "$(git -C "$INSTALL_DIR" config --get remote.origin.url 2>/dev/null)" in
+        ""|https://github.com/Fede654/hermes-agent.git|git@github.com:Fede654/hermes-agent.git) ;;
+        *) BRANCH="main" ;;
+    esac
+fi
 export HERMES_HOME
 
 INSTALL_LOG="$HERMES_HOME/logs/install.log"
@@ -1118,7 +1130,11 @@ stage_products() {
         "$boot_py" -I -B -X utf8 hermes_cli/source_completion.py "${args[@]}") \
         || fail "app products or command publication failed" products_build_failed
     wire_shell_path
-    log_success "app products and hermes command ready"
+    if [ -f "$INSTALL_DIR/fork-memory.json" ]; then
+        (cd "$INSTALL_DIR" && "$INSTALL_DIR/.hermes/bin/hermes" memory bootstrap) \
+            || fail "default memory installation or validation failed; memory selection unchanged" other
+    fi
+    log_success "app products, hermes command and default memory ready"
 }
 
 stage_desktop() {
