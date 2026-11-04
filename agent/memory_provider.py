@@ -223,3 +223,33 @@ class MemoryProvider(ABC):
         """Absolute paths of provider state OUTSIDE HERMES_HOME for ``hermes backup``/``import``
         (paths outside the home dir are skipped). MUST work without ``initialize()`` or network."""
         return []
+
+    def audit_snapshot(self, *, session_id: str, query: str) -> dict[str, Any]:
+        """Optional read-only knowledge-audit snapshot: JSON facts plus an opaque revision.
+
+        Return {"facts": [...], "revision": "...", "complete": bool, "atomic_apply": bool}. The revision
+        must change on every relevant write. Set atomic_apply only when both batch
+        methods are implemented (including hosted plugins). No extraction, recall counters or network
+        writes. Called in a subagent context with the routed session identity.
+        Older providers may omit this; the auditor can inspect fact_store read actions.
+        """
+        raise NotImplementedError("This provider has no audit snapshot capability")
+
+    def apply_audit_batch(self, *, batch_id: str, expected_revision: str, operations: list[dict]) -> dict:
+        """Optional atomic compare-and-swap batch, called only after the activity fence.
+
+        Check revision and ALL operations before changing anything; commit all or none.
+        batch_id is durable/idempotent: retrying returns the same receipt without writes.
+        Return {"batch_id": batch_id, "writes": [{"fact_id": ..., "before": ..., "after": ...}]}.
+        No network or deferred writes: this executes under the short state.db fence.
+        A failure raises and rolls back; never implement by looping independent tool calls.
+        """
+        raise NotImplementedError("This provider cannot apply atomic audit batches")
+
+    def audit_batch_status(self, batch_id: str) -> Optional[dict]:
+        """Durable receipt for a committed audit batch, or None if never committed.
+
+        Must be read-only and agree with apply_audit_batch across crashes. Required
+        alongside apply_audit_batch so the engine can recover reports safely.
+        """
+        raise NotImplementedError("This provider has no durable audit receipts")

@@ -403,7 +403,11 @@ def cmd_status(args) -> None:
             for key, val in display_config.items():
                 print(f"    {key}: {val}")
 
-        if provider:
+        from plugins.memory import parked_provider_notice
+        parked = parked_provider_notice(provider_name)
+        if parked:
+            print(f"\n  Plugin:    turned off ✗\n  {parked}")
+        elif provider:
             print("\n  Plugin:    installed ✓")
             if provider.is_available():
                 print("  Status:    available ✓")
@@ -441,9 +445,9 @@ def cmd_status(args) -> None:
 
 def memory_command(args) -> None:
     """Route memory subcommands."""
-    if getattr(args, "memory_command", None) == "bootstrap":
-        from hermes_cli.fork_memory import install_default_memory
-        print(install_default_memory(get_hermes_home()))
+    if getattr(args, "memory_command", None) == "audit":
+        from hermes_cli.memory_audit import audit_command
+        audit_command(args)
         return
     if getattr(args, "memory_command", None) == "setup":
         from pm.package import InstallError

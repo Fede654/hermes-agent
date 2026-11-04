@@ -14,8 +14,8 @@ push disabled.
 | `upstream/main` | Read-only Nous development reference | Fetch and inspect; never push upstream. |
 | `main` | Exact mirror of Nous development at the last sync | No fork patches, merges, or local documentation. |
 | Official Nous release tag | Reproducible runtime base | Record the exact tag and commit. |
-| `feat/integration` | Default branch and single deploy target | Published release plus the maintained delta. |
-| `integration/sync-<date>` | Temporary release candidate | Build and test in isolation; PRs target `feat/integration`. |
+| `feat/integration` | Default branch and single deploy target | Validated upstream main commit plus the maintained delta. |
+| `integration/sync-<date>` | Temporary integration candidate | Build and test in isolation; PRs target `feat/integration`. |
 | `feat/*`, `fix/*` | Active development | Keep changes focused and independently testable. |
 | `canonical-<date>` tags | Optional validated runtime snapshots | Immutable release pins. |
 
@@ -24,8 +24,9 @@ upstream tree.
 
 ## Maintained extensions
 
-The runtime base is NousResearch `v0.22.5`, commit
-`bf0203a794a07aac3ff764972ab9087baa4e4f4e`.
+The current local candidate is rebased on upstream `main` at
+`27cbcb122f` (2026-11-04). This is not a deployment pin until validated and promoted.
+The previous deployed base was `v0.22.5` (`bf0203a`); provisioning still owns its pin.
 
 - **Outbound send audit.** `agent/send_audit.py` records `send_message`
   attempts from `hermes send`, cron and dashboard messaging in each
@@ -50,22 +51,20 @@ The runtime base is NousResearch `v0.22.5`, commit
 
 ## External memory provider
 
-[Hermes Memory Kit](https://github.com/Fede654/hermes-memory-kit) is the default
-memory backend for this distribution. The Unix installer fetches only its
-`hermes_plugin/` runtime package at the exact commit in `fork-memory.json`,
-prepares dependencies through Hermes PM and validates SQLite plus local
-multilingual CPU embeddings before selecting it.
+The fork retains standard Hermes memory setup and does not install or select an
+external provider. `agent-provision-nous` owns Holographic installation, exact version
+pins, configuration and doctrine. Removing the installer bootstrap does not migrate
+existing profiles: provisioning must explicitly select the provider and clean residual
+HMK configuration after backups. Existing memory files and databases are preserved.
 
-`remember` and `recall` provide deliberate writes and retrieval; `librarian`
-supports inspection, expansion, updates and deletion. Automatic recall uses
-Hermes' existing prefetch channel. Session-end and pre-compression extraction
-use the configured auxiliary model. Each profile owns its database at
-`<HERMES_HOME>/hmk-memory/library.db`; no process-wide HMK paths are used.
-Native summaries are imported once and retained on disk.
+Knowledge has three distinct layers: library (canonical documents and sources), wiki
+(current concepts and links to those sources), and episodic memory (dated decisions,
+events and pointers). Skills contain reusable procedures. Audit rules and concrete
+paths come from the deployed doctrine; the engine must not impose vendor-specific
+storage or silently turn the wiki/library into additional memory stores.
 
-Run `hermes memory bootstrap` to provision the current profile explicitly.
-An explicit choice of another provider is preserved by installer reruns.
-Configuration changes affect new sessions. See [HMK installation](HMK_MEMORY.md).
+See [knowledge audit status and contract](FORK_MEMORY_AUDIT.md) for configuration, the idle review service,
+provider transaction contract and deployment validation.
 
 ## Deploying an agent
 
@@ -104,17 +103,17 @@ Never put real phone numbers or credentials in this repository.
 1. Fetch Nous's development branch and published releases. Fast-forward
    `main` to the exact fetched upstream commit. An upstream history rewrite
    requires an explicit reference-replacement decision.
-2. Select a published release tag and record its commit. Build the maintained
-   delta on that tag in an isolated `integration/sync-<date>` worktree.
+2. Select the fetched upstream main commit and record its full SHA. Build the maintained
+   delta on that commit in an isolated `integration/sync-<date>` worktree.
 3. Retain the current integration's ancestry when preparing a promotion and
-   compare the final tree with the chosen release to keep the delta explicit.
+   compare the final tree with the chosen upstream commit to keep the delta explicit.
 4. Run `scripts/run_tests.sh` for audit, messaging, multiplex-profile isolation,
    relay-target authorization and WhatsApp allowlist behavior. Run
-   `python scripts/check --base <release-tag>` for the full lint gate.
+   `python scripts/check --base <upstream-sha>` for the full lint gate.
 5. Review and validate the exact candidate SHA, then promote through a PR to
    `feat/integration` without force-updating the default branch.
 6. Deploy only under separate authorization, using current PM tools and each
-   profile's own configuration. Validate HMK discovery/recall and live delivery.
+   profile's own configuration. Validate configured provider discovery/recall and live delivery.
 7. Remove integrated temporary branches only after verifying their exact tips
    are ancestors of the integration and reachable from a remote ref. Leave
    active Orca workspaces intact.
