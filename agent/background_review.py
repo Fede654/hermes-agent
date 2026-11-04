@@ -239,7 +239,10 @@ def load_background_review_settings() -> tuple[bool, dict[str, Any]]:
     try:
         from hermes_cli.config import load_config_readonly
         from utils import is_truthy_value
-        task = _task_block(load_config_readonly())
+        config = load_config_readonly() or {}
+        if is_truthy_value((config.get("audit") or {}).get("enabled"), default=False):
+            return False, {}
+        task = _task_block(config)
         return is_truthy_value(task.get("enabled"), default=True), task
     except Exception:
         logger.warning(

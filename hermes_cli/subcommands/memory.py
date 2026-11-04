@@ -31,4 +31,12 @@ def build_memory_parser(subparsers, *, cmd_memory: Callable) -> None:
     _reset_parser.add_argument(
         "--target", choices=["all", "memory", "user"], default="all",
         help="Which store to reset: 'all' (default), 'memory', or 'user'")
+    audit = memory_sub.add_parser("audit", help="Audit deployed knowledge locally, without messaging delivery")
+    audit_sub = audit.add_subparsers(dest="audit_command")
+    audit_sub.add_parser("tick", help="Check all routed sessions; review only idle sessions with new material")
+    run = audit_sub.add_parser("run", help="Check and audit one idle session")
+    run.add_argument("session_id")
+    audit_sub.add_parser("status", help="List recent local audit runs")
+    show = audit_sub.add_parser("show", help="Read one local audit report")
+    show.add_argument("run_id")
     memory_parser.set_defaults(func=cmd_memory)

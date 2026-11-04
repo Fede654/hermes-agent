@@ -21,25 +21,26 @@ class AuditWindow:
     through_id: int
     rows: tuple[dict, ...]
     omitted_messages: int
+    generation: tuple = ()
 
 
 def session_busy(conn: sqlite3.Connection, session_id: str, now: float) -> bool:
-    """Respect durable foreground, compression and delegation ownership."""
-    for table, key in (('session_turn_leases', 'conversation_id'), ('compression_locks', 'session_id')):
+    """Shared knowledge is profile-wide: any foreground/background writer defers audit."""
+    for table in ('session_turn_leases', 'compression_locks'):
         if conn.execute(
-            f'SELECT 1 FROM {table} WHERE {key}=? AND expires_at>?', (session_id, now)
+            f'SELECT 1 FROM {table} WHERE expires_at>?', (now,)
         ).fetchone():
             return True
     return conn.execute(
         """SELECT 1 FROM async_delegations
-           WHERE (origin_session=? OR origin_session_id=? OR parent_session_id=?)
-             AND (state IN ('running','finalizing') OR delivery_state IN ('pending','claimed'))""",
-        (session_id, session_id, session_id),
+           WHERE state IN ('running','finalizing') OR delivery_state IN ('pending','claimed')""",
     ).fetchone() is not None
 
 
-def _evidence(row: sqlite3.Row) -> dict:
-    result = {key: row[key] for key in ('id', 'role', 'content', 'tool_name', 'tool_call_id')}
+def _evidence(row: sqlite3.Row, call_names: dict) -> dict:
+    result = {key: row[key] for key in ('id', 'role', 'content', 'tool_name', 'tool_call_id', 'timestamp')}
+    if not result['tool_name'] and row['tool_call_id']:
+        result['tool_name'] = call_names.get(row['tool_call_id'])
     if row['tool_calls']:
         calls = json.loads(row['tool_calls'])
         result['tool_calls'] = [
@@ -52,10 +53,15 @@ def _evidence(row: sqlite3.Row) -> dict:
             }
             for call in calls
         ]
-    if row['role'] == 'tool' and row['tool_name'] not in _MEMORY_TOOLS:
+    if row['role'] == 'tool' and result['tool_name'] not in _MEMORY_TOOLS:
         # Arbitrary tool bodies are unbounded and can contain binary or private data.
         result['content'] = str(row['content'] or '')[:240]
         result['summary_only'] = True
+        try:
+            payload = json.loads(row['content'] or '')
+            result['outcome'] = ('error' if payload.get('error') or payload.get('success') is False else 'success') if isinstance(payload, dict) else 'unknown'
+        except (ValueError, TypeError):
+            result['outcome'] = 'unknown'
     return result
 
 
@@ -79,7 +85,7 @@ def prepare_window(
         if session_busy(conn, session_id, now):
             return None
         latest = conn.execute(
-            "SELECT MAX(timestamp), MAX(id) FROM messages WHERE session_id=? AND role='user' AND observed=0",
+            "SELECT MAX(timestamp), MAX(id) FROM messages WHERE session_id=? AND role='user'",
             (session_id,),
         ).fetchone()
         if latest[0] is None or now - latest[0] < idle_hours * 3600:
@@ -93,7 +99,9 @@ def prepare_window(
         if not new:
             return None
         chosen = new[:max_messages]
-        first_id, through_id = chosen[-1][0], chosen[0][0]
+        first_id = chosen[-1][0]
+        generation = session_generation(conn, session_id)
+        through_id = generation[0]
         prior = conn.execute(
             """SELECT id FROM messages WHERE session_id=? AND id<=? AND timestamp>=?
                AND role IN ('user','assistant') AND content IS NOT NULL AND content!=''
@@ -103,10 +111,22 @@ def prepare_window(
         if prior and len(new) <= max_messages:
             first_id = min(first_id, prior[-1][0])
         rows = conn.execute(
-            """SELECT id,role,content,tool_name,tool_call_id,tool_calls FROM messages
+            """SELECT id,role,content,tool_name,tool_call_id,tool_calls,timestamp FROM messages
                WHERE session_id=? AND id BETWEEN ? AND ? AND _compressed_summary=0
                ORDER BY id""", (session_id, first_id, through_id),
         ).fetchall()
-        return AuditWindow(session_id, watermark, through_id, tuple(map(_evidence, rows)), len(new) - len(chosen))
+        call_names = {}
+        for row in rows:
+            for call in json.loads(row['tool_calls'] or '[]'):
+                call_names[call.get('id')] = call.get('function', {}).get('name')
+        evidence = tuple(_evidence(row, call_names) for row in rows)
+        return AuditWindow(session_id, watermark, through_id, evidence, len(new) - len(chosen), generation)
     finally:
         conn.close()
+
+
+def session_generation(conn: sqlite3.Connection, session_id: str) -> tuple:
+    """Detect arrivals, deletion/rewind and in-place transcript mutations."""
+    messages = conn.execute('SELECT COALESCE(MAX(id),0),COUNT(*) FROM messages WHERE session_id=?', (session_id,)).fetchone()
+    session = conn.execute('SELECT transcript_revision FROM sessions WHERE id=?', (session_id,)).fetchone()
+    return (messages[0], messages[1], session[0] if session else None)

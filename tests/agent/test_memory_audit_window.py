@@ -31,7 +31,7 @@ def test_foreground_and_new_user_activity_defer_audit(tmp_path):
     db.append_message('topic', 'user', 'old decision', timestamp=100)
     assert prepare_window(path, 'topic', 0, now=30000) is not None
     with sqlite3.connect(path) as conn:
-        conn.execute('INSERT INTO session_turn_leases VALUES (?,?,?,?)', ('topic', 'owner', 29000, 31000))
+        conn.execute('INSERT INTO session_turn_leases VALUES (?,?,?,?)', ('another-topic', 'owner', 29000, 31000))
     assert prepare_window(path, 'topic', 0, now=30000) is None
     with sqlite3.connect(path) as conn:
         conn.execute('DELETE FROM session_turn_leases')

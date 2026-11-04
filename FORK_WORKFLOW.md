@@ -63,8 +63,8 @@ events and pointers). Skills contain reusable procedures. Audit rules and concre
 paths come from the deployed doctrine; the engine must not impose vendor-specific
 storage or silently turn the wiki/library into additional memory stores.
 
-See [knowledge audit status and contract](FORK_MEMORY_AUDIT.md) for the bounded
-evidence preparer and the remaining execution/transaction work.
+See [knowledge audit status and contract](FORK_MEMORY_AUDIT.md) for configuration, the idle review service,
+provider transaction contract and deployment validation.
 
 ## Deploying an agent
 
