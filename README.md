@@ -1,15 +1,14 @@
 ## Install this fork
 
-The validated runtime is `feat/integration`, based on Nous `v0.22.5`. On Unix,
-this installer also provisions the pinned HMK memory plugin with local,
-multilingual CPU embeddings and makes it the default after verification:
+The integration branch tracks a validated commit of Nous `main` plus the maintained
+fork patches. See [fork workflow](FORK_WORKFLOW.md) for the candidate base and checks.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Fede654/hermes-agent/feat/integration/scripts/install.sh | bash
 ```
 
-See [memory configuration and validation](HMK_MEMORY.md) and the
-[fork workflow](FORK_WORKFLOW.md). The upstream documentation follows below.
+Memory uses the standard Hermes setup. Provider installation, version pins and doctrine
+belong to `agent-provision-nous`; the fork installer does not select a memory provider.
 
 <p align="center">
   <img src="assets/banner.png" alt="Hermes Agent" width="100%">

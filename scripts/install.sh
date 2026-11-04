@@ -1132,11 +1132,7 @@ stage_products() {
         "$boot_py" -I -B -X utf8 hermes_cli/source_completion.py "${args[@]}") \
         || fail "app products or command publication failed" products_build_failed
     wire_shell_path
-    if [ -f "$INSTALL_DIR/fork-memory.json" ]; then
-        (cd "$INSTALL_DIR" && "$INSTALL_DIR/.hermes/bin/hermes" memory bootstrap) \
-            || fail "default memory installation or validation failed; memory selection unchanged" other
-    fi
-    log_success "app products, hermes command and default memory ready"
+    log_success "app products and hermes command ready"
 }
 
 stage_desktop() {
