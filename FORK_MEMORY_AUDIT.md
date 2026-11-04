@@ -21,7 +21,7 @@ The auditor reads the **installed** doctrine (by default `AGENTS.md`,
   Phase 1a reports issues; it cannot create/edit skills or move content.
 
 No correction is a valid and expected outcome. The reviewer has **no tools**;
-its JSON response is a proposed plan. Library/wiki/skills/native-memory changes
+its JSON response is a proposed plan. Atomic batches are desirable, not required. Library/wiki/skills/native-memory changes
 remain findings. Native MEMORY.md/USER.md and doctrine/SOUL are never rewritten.
 This deliberately leaves native-rule restoration as a report for the foreground
 agent/operator rather than mixing file writes with an external fact transaction.
@@ -106,13 +106,15 @@ read-only diagnostic command that prints an evidence window or `null`.
    when the provider never returned usage.
 6. Validate the complete plan: bounded writes, allowed operations (`add/change`),
    existing evidence ids, exact expected old fact text and unique target ids.
-   An incomplete snapshot cannot justify an `add`. Budget-omitted conversation
+   An incomplete snapshot requires a targeted prewrite search before an `add`;
+   newly surfaced, unreviewed candidates defer it. Budget-omitted conversation
    text cannot justify a correction. Skills/wiki/library/native writes are never
    part of the executable plan.
-7. Dry-run publishes only a local report and bitacora entry. Apply checks the
-   provider's transaction capability and revision, rechecks activity under the
-   short state.db writer fence, then commits exactly one idempotent batch. A new
-   turn cannot be admitted halfway through that commit.
+7. Dry-run publishes only a local report and bitacora entry. Apply uses an atomic
+   batch when supported. Otherwise, it uses normal `fact_store` operations, rereads
+   each change target, checks activity before each write, and journals every result.
+   It stops remaining writes on an arrival, conflict, refusal or unknown outcome.
+   Earlier corrections remain committed; there is no batch rollback.
 8. Persist successful watermarks only after reporting. A second check of the same
    window makes no model call or corrections. Truncated history is explicitly a
    coverage gap; discarded messages are never claimed to have been reviewed.
@@ -122,8 +124,12 @@ private directory/database. Bitacora includes window, findings, proposals, actua
 fact ids/before/after from the receipt and pending issues. Reports are local and
 have no Telegram or other messaging delivery path. The run id marks journal
 entries so receipt recovery cannot append the same successful report twice.
-A crash during apply leaves a `committing` record; the next invocation queries
-its durable provider receipt before advancing or retrying anything.
+A crash during atomic apply leaves a `committing` record; the next invocation
+queries its durable provider receipt. Individual apply uses `applying` plus durable
+per-operation states: planned, in-flight, applied, already-current, failed,
+deferred or unknown. Recovery reports ambiguous outcomes without replaying the
+old writes. Partial/unknown runs do not advance the watermark; a fresh audit reads
+current memory before proposing any further corrections.
 
 ## External provider contract
 
@@ -158,18 +164,45 @@ claim a missing fact merely because a bounded search missed it. Other providers
 need their own `audit_snapshot` implementation. No provider-specific SQL, plugin
 imports, memory database format or version pin lives in this audit engine.
 
-**The deployed Holographic v0.25.3 pin (`820b777f`) has no atomic batch/receipt
-methods.** It supports the read-only dry-run path. `apply` refuses it before a model
-request. Enabling atomic writes requires implementing the contract in the external
-provider plugin; changing configuration or issuing sequential `fact_store` calls
-cannot supply that guarantee. The fork's transaction and recovery paths are tested
-through real discovery of an isolated contract provider, not by modifying Holographic.
+**The deployed Holographic v0.25.3 pin (`820b777f`) supports individual apply**
+through its ordinary `fact_store search/history/add/change` actions. No plugin fork
+is required. The isolated applier uses the provider's cron context, which permits
+explicit writes when its existing `cron_writes` policy allows them, without running
+automatic session extraction. The reviewer still uses read-only subagent context.
+The engine validates write results, records returned ids and before/after text,
+and sets retrieval keywords deliberately when the tool exposes them.
+
+## Accepted concurrency limitation (2026-11-04)
+
+The user explicitly relaxed the original all-or-none requirement. Six or more hours
+of inactivity is the primary operational mitigation; checks before and between
+corrections are additional protection. That makes concurrent activity less likely
+in the intended workflow, but its probability has not been measured.
+
+A user message, foreground task, external writer or crash can still arrive between
+the last check and a provider commit. Individual calls have no global revision
+compare-and-swap, rollback or exactly-once guarantee. A crash after commit but
+before receipt persistence leaves an **unknown outcome**. An error response after
+a provider call is also treated as unknown: it is not proof the provider rolled
+back every side effect. These are accepted,
+known design limits, not reasons to prevent normal corrections or require a fork
+of Holographic. They are included in every individual-apply report. Atomic batch
+support remains a desirable future improvement. No automatic retry of an old
+in-flight operation, service restart or user-facing notification is introduced.
+
+## Memory-call observability
+
+See [memory observability findings](FORK_MEMORY_OBSERVABILITY.md) for the exact
+coverage in Hermes and the deployed Holographic pin. Audit evidence now includes
+memory blocks from `messages.api_content` alongside the unchanged original user
+text. This is evidence of exposure to the model, not proof the model used a fact.
+No new global call logger or telemetry collector is enabled by this change.
 
 ## Validation
 
 Behaviour tests cover real SessionDB/provider discovery, dry-run non-mutation and
 usage, idempotence, cancellation on new messages, worker termination, concurrent
-claims, source changes, explicit profile binding, atomic batch failure and crash
+claims, source changes, explicit profile binding, atomic batch failure, individual partial writes and crash
 receipt recovery, budget refusal before model dispatch, layer/source/skill evidence
 and rejecting unsafe/unverified model operations. They do not prove the chosen
 LLM's judgement. The pre-cleanup Eyja/Filiberto exports are still needed for the

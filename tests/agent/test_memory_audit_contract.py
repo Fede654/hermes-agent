@@ -97,3 +97,15 @@ def test_budget_omissions_keep_complete_memory_operations():
     assert packet['window']['rows'][1]['content'] == memory_text
     assert packet['coverage_gaps']
     assert sum(len(message['content'].encode()) + 16 for message in messages) <= 6000
+
+
+def test_correction_must_set_retrieval_terms_when_provider_exposes_keywords():
+    window = AuditWindow('topic', 0, 1, ({'id': 1},), 0)
+    snapshot = {'facts': [{'fact_id': 109, 'content': 'old'}], 'complete': False, 'write_fields': ['keywords']}
+    op = {'action': 'change', 'fact_id': 109, 'expected_before': 'old', 'content': 'new',
+          'reason': 'Confirmed decision', 'origin': 'said', 'evidence_ids': [1]}
+    plan = {'findings': [], 'summary': 'One correction', 'operations': [op]}
+    with pytest.raises(ValueError, match='retrieval keywords'):
+        validate_plan(json.dumps(plan), window, snapshot, 8)
+    op['keywords'] = ['project', 'decision']
+    assert validate_plan(json.dumps(plan), window, snapshot, 8)['operations'][0]['keywords'] == op['keywords']

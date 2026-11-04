@@ -20,15 +20,13 @@ def execute(request: dict, progress=None) -> dict:
     query = '\n'.join(str(row.get('content') or '') for row in window.rows if row['role'] == 'user')[-8000:]
     with audit_provider(config, home, request['session'], workspace) as provider:
         snapshot = provider_snapshot(provider, window.session_id, query)
-        if settings.mode == 'apply' and not snapshot.get('atomic_apply'):
-            raise RuntimeError('Provider does not support atomic audit batches; use audit.mode: dry_run')
     model_config = config.get('model')
     runtime = ({**model_config, 'model': model_config.get('default', '')} if isinstance(model_config, dict)
                else {'model': model_config or ''})
     # The auxiliary router resolves credentials through the owning profile's secret scope.
     plan, accounting = review(window, context, snapshot, settings, runtime, progress)
     return {'plan': plan, 'accounting': accounting, 'revision': snapshot.get('revision'),
-            'atomic_apply': snapshot.get('atomic_apply', False),
+            'atomic_apply': snapshot.get('atomic_apply', False), 'snapshot': snapshot,
             'fingerprints': evidence_fingerprints(context), 'window': asdict(window),
             'coverage_gaps': accounting.get('coverage_gaps', [])}
 

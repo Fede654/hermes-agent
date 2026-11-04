@@ -13,7 +13,7 @@ def atomic_capable(provider) -> bool:
 
 
 @contextmanager
-def audit_provider(config: dict, home, session: dict, workspace):
+def audit_provider(config: dict, home, session: dict, workspace, *, writable: bool = False):
     name = (config.get('memory') or {}).get('provider')
     if is_core_memory_provider(name):
         yield None
@@ -24,9 +24,9 @@ def audit_provider(config: dict, home, session: dict, workspace):
         raise RuntimeError(f'Configured memory provider {name!r} is unavailable')
     try:
         provider.initialize(
-            session['id'], hermes_home=str(home), agent_context='subagent',
+            session['id'], hermes_home=str(home), agent_context='cron' if writable else 'subagent',
             platform=session['source'], agent_workspace=str(workspace),
-            **{key: session.get(key) or '' for key in ('user_id', 'chat_id', 'thread_id')},
+            **{key: session.get(key) or '' for key in ('user_id', 'chat_id', 'chat_type', 'thread_id')},
         )
         yield provider
     finally:
@@ -43,8 +43,9 @@ def provider_snapshot(provider, session_id: str, query: str) -> dict:
         return {**snapshot, 'atomic_apply': snapshot.get('atomic_apply') is True and atomic_capable(provider)}
     except NotImplementedError:
         pass
-    names = {schema.get('name', schema.get('function', {}).get('name')) for schema in provider.get_tool_schemas()}
-    if 'fact_store' not in names:
+    schemas = [schema.get('function', schema) for schema in provider.get_tool_schemas()]
+    schema = next((item for item in schemas if item.get('name') == 'fact_store'), None)
+    if schema is None:
         raise RuntimeError('Provider needs audit_snapshot or a read-only fact_store tool for auditing')
     reads, facts = [], {}
     # Do not infer absence from these bounded reads: the model must report coverage limits.
@@ -58,7 +59,8 @@ def provider_snapshot(provider, session_id: str, query: str) -> dict:
             if isinstance(fact, dict) and 'fact_id' in fact:
                 facts[fact['fact_id']] = fact
     return {'reads': reads, 'facts': list(facts.values()), 'revision': '', 'complete': False,
-            'atomic_apply': False, 'note': 'Bounded fact_store reads; absence is not proof a fact is missing.'}
+            'atomic_apply': False, 'prewrite_search': True,
+            'write_fields': list((schema.get('parameters') or {}).get('properties', {})), 'note': 'Bounded fact_store reads; absence is not proof a fact is missing.'}
 
 
 @contextmanager

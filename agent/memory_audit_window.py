@@ -7,6 +7,7 @@ window caps are explicitly reported, never silently represented as audited.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +40,12 @@ def session_busy(conn: sqlite3.Connection, session_id: str, now: float) -> bool:
 
 def _evidence(row: sqlite3.Row, call_names: dict) -> dict:
     result = {key: row[key] for key in ('id', 'role', 'content', 'tool_name', 'tool_call_id', 'timestamp')}
+    if row['role'] == 'user' and row['content'] and row['api_content'] and row['api_content'].startswith(row['content']):
+        suffix = row['api_content'][len(row['content']):]
+        blocks = re.findall(r'<memory-context>([\s\S]*?)</memory-context>', suffix)
+        if blocks:
+            result['injected_memory'] = {'source': 'messages.api_content', 'blocks': blocks,
+                                         'meaning': 'Exposed to the model; not proof of use'}
     if not result['tool_name'] and row['tool_call_id']:
         result['tool_name'] = call_names.get(row['tool_call_id'])
     if row['tool_calls']:
@@ -111,7 +118,7 @@ def prepare_window(
         if prior and len(new) <= max_messages:
             first_id = min(first_id, prior[-1][0])
         rows = conn.execute(
-            """SELECT id,role,content,tool_name,tool_call_id,tool_calls,timestamp FROM messages
+            """SELECT id,role,content,tool_name,tool_call_id,tool_calls,timestamp,api_content FROM messages
                WHERE session_id=? AND id BETWEEN ? AND ? AND _compressed_summary=0
                ORDER BY id""", (session_id, first_id, through_id),
         ).fetchall()

@@ -81,7 +81,7 @@ def install_model(monkeypatch, message_id, *, extra=None):
     plan = {'findings': [], 'summary': 'One outdated decision.', 'operations': [{
         'action': 'change', 'fact_id': 109, 'expected_before': '2026-11-03: reel not yet published',
         'content': '2026-11-04: reel published', 'reason': 'Explicit user confirmation',
-        'origin': 'said', 'evidence_ids': [message_id],
+        'origin': 'said', 'evidence_ids': [message_id], 'keywords': ['reel', 'publication'],
     }]}
     if extra:
         plan['operations'].append(extra)

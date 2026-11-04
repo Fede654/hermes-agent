@@ -64,7 +64,7 @@ class AuditStore:
 
     def pending(self):
         with self.connect() as conn:
-            return conn.execute("SELECT id,session_id,through_id,mode,report FROM runs WHERE status='committing'").fetchall()
+            return conn.execute("SELECT id,session_id,through_id,mode,report FROM runs WHERE status IN ('committing','applying')").fetchall()
 
     def status(self):
         with self.connect() as conn:

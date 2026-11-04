@@ -15,6 +15,7 @@ import time
 import uuid
 
 from agent.memory_audit_backend import atomic_capable, audit_provider, audit_scope
+from agent.memory_audit_apply import apply_individual, recover_individual
 from agent.memory_audit_config import AuditSettings
 from agent.memory_audit_context import evidence_unchanged
 from agent.memory_audit_reports import publish_report, record_usage
@@ -78,8 +79,13 @@ def _apply(home, workspace, config, session, settings, store, run_id, window, re
     operations = result['plan']['operations']
     if not operations:
         return None
-    if not result.get('atomic_apply') or not result.get('revision'):
-        raise RuntimeError('Provider lacks atomic audit batches; use dry_run or upgrade the external provider')
+    if not result.get('atomic_apply'):
+        return apply_individual(
+            home, workspace, config, session, settings, store, run_id, window, result,
+            lambda: still_idle(home, window, time.time()) and evidence_unchanged(result['fingerprints'], home, workspace),
+        )
+    if not result.get('revision'):
+        raise RuntimeError('Atomic provider returned no snapshot revision')
     with audit_provider(config, home, session, workspace) as provider:
         if not atomic_capable(provider):
             raise RuntimeError('Provider lost its atomic audit capability')
@@ -105,6 +111,11 @@ def recover_pending(home, workspace, config, settings, store):
         if row is None:
             raise RuntimeError(f'Cannot recover audit {run_id}: source session is missing')
         report = json.loads(raw)
+        if report.get('apply_strategy') == 'individual':
+            report['status'] = recover_individual(report)
+            publish_report(store, workspace, settings, run_id, report)
+            store.save(run_id, session_id, through_id, mode, report['status'], report)
+            continue
         with audit_provider(config, home, dict(row), workspace) as provider:
             if not atomic_capable(provider):
                 raise RuntimeError(f'Audit {run_id} requires provider receipt recovery before further apply runs')
@@ -150,10 +161,10 @@ def _audit_session(home: Path, config: dict, session: dict, *, reviewer=run_revi
             else:
                 if settings.mode == 'apply':
                     report['receipt'] = _apply(home, workspace, config, session, settings, store, run_id, window, report)
-                report['status'] = 'complete'
+                report['status'] = (report.get('receipt') or {}).get('audit_status', 'complete')
         except Exception as exc:
             logging.getLogger(__name__).exception("Knowledge audit failed")
-            # Keep a committing row for crash/receipt recovery, never retry blindly.
+            # Keep pending rows for receipt recovery or partial-write reporting; never retry blindly.
             if any(row[0] == run_id for row in store.pending()):
                 return {'status': 'recovery_required', 'run_id': run_id, 'error': str(exc)}
             report.update(status='failed', error=str(exc))
