@@ -40,7 +40,9 @@ def still_idle(home: Path, window, now: float) -> bool:
 
 def run_reviewer(request: dict, home: Path, workspace: Path, settings, window) -> dict:
     """Cancellation kills only the isolated reviewer; no tool writes ever ran."""
-    worker = Path(__file__).resolve().parents[1] / 'scripts/memory_audit_worker.py'
+    from hermes_cli._startup_fast import project_root_str
+
+    worker = Path(project_root_str()) / 'scripts/memory_audit_worker.py'
     with tempfile.TemporaryDirectory(prefix='review-', dir=home / 'memory-audit') as temp:
         request_path, output_path = Path(temp) / 'request.json', Path(temp) / 'result.json'
         request_path.write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
